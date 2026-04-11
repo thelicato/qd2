@@ -74,6 +74,7 @@ pub struct ConnectTarget {
     pub console_label: String,
     pub width: u32,
     pub height: u32,
+    pub console_interfaces: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -198,6 +199,7 @@ pub async fn resolve_connect_target(
         console_label: console.label.clone(),
         width: console.width,
         height: console.height,
+        console_interfaces: console.interfaces.clone(),
         warnings: report.warnings,
     })
 }

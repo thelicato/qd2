@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     convert::TryFrom,
     rc::Rc,
-    sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+    sync::mpsc::{self as std_mpsc, Receiver, Sender, SyncSender, TryRecvError},
     thread,
     time::Duration,
 };
@@ -20,9 +20,10 @@ use pixman_sys::{
 #[cfg(unix)]
 use qemu_display::ScanoutDMABUF;
 use qemu_display::{
-    ConsoleListenerHandler, ConsoleProxy, Cursor, MouseSet, Scanout, Update, UpdateDMABUF,
+    ConsoleListenerHandler, ConsoleProxy, Cursor, KeyboardProxy, MouseButton, MouseProxy, MouseSet,
+    Scanout, Update, UpdateDMABUF,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use zbus::{
     Connection,
     zvariant::{Fd, OwnedObjectPath},
@@ -43,15 +44,16 @@ const PIXMAN_X8R8G8B8: u32 = pixman_format_code_t_PIXMAN_x8r8g8b8;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 
 pub fn connect(target: ConnectTarget) -> Result<()> {
-    let (event_tx, event_rx) = mpsc::channel();
-    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (event_tx, event_rx) = std_mpsc::channel();
+    let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+    let (input_tx, input_rx) = tokio_mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
     let join_handle = thread::Builder::new()
         .name("qd2-display-listener".to_owned())
         .spawn({
             let target = target.clone();
-            move || run_listener_thread(target, event_tx, ready_tx, shutdown_rx)
+            move || run_listener_thread(target, event_tx, ready_tx, input_rx, shutdown_rx)
         })
         .context("failed to spawn the QEMU display listener thread")?;
 
@@ -59,7 +61,7 @@ pub fn connect(target: ConnectTarget) -> Result<()> {
         .recv()
         .context("display listener thread ended before it reported startup state")??;
 
-    let ui_result = run_window(&target, &ready, event_rx);
+    let ui_result = run_window(&target, &ready, event_rx, input_tx);
 
     let _ = shutdown_tx.send(());
     join_handle
@@ -73,12 +75,19 @@ fn run_listener_thread(
     target: ConnectTarget,
     event_tx: Sender<ViewerEvent>,
     ready_tx: SyncSender<Result<ViewerReady>>,
+    input_rx: tokio_mpsc::UnboundedReceiver<InputEvent>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let result = tokio::runtime::Runtime::new()
         .context("failed to create the async runtime for the display listener")
         .and_then(|runtime| {
-            runtime.block_on(listener_main(target, event_tx, ready_tx, shutdown_rx))
+            runtime.block_on(listener_main(
+                target,
+                event_tx,
+                ready_tx,
+                input_rx,
+                shutdown_rx,
+            ))
         });
 
     if let Err(error) = result {
@@ -90,7 +99,8 @@ async fn listener_main(
     target: ConnectTarget,
     event_tx: Sender<ViewerEvent>,
     ready_tx: SyncSender<Result<ViewerReady>>,
-    shutdown_rx: oneshot::Receiver<()>,
+    mut input_rx: tokio_mpsc::UnboundedReceiver<InputEvent>,
+    mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     let connection = qemu::connect(target.source_address.as_deref()).await?;
     let mut console = RemoteConsole::new(&connection, &target.owner, target.console_id)
@@ -106,15 +116,51 @@ async fn listener_main(
         "QD2 - {} - Console {} ({})",
         target.vm_name, target.console_id, target.console_label
     );
+    let keyboard_available = target
+        .console_interfaces
+        .iter()
+        .any(|interface| interface == "org.qemu.Display1.Keyboard");
+    let mouse_available = target
+        .console_interfaces
+        .iter()
+        .any(|interface| interface == "org.qemu.Display1.Mouse");
+    let mouse_mode = if mouse_available {
+        match console.mouse_is_absolute().await {
+            Ok(true) => MouseMode::Absolute,
+            Ok(false) => MouseMode::Relative,
+            Err(error) => {
+                let _ = event_tx.send(ViewerEvent::Status(format!(
+                    "Could not detect mouse mode: {error:#}"
+                )));
+                MouseMode::Relative
+            }
+        }
+    } else {
+        MouseMode::Disabled
+    };
 
     let _ = ready_tx.send(Ok(ViewerReady {
         title,
         width: target.width,
         height: target.height,
+        keyboard_available,
+        mouse_mode,
     }));
 
-    match shutdown_rx.await {
-        Ok(()) | Err(_) => {}
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => break,
+            maybe_input = input_rx.recv() => match maybe_input {
+                Some(input) => {
+                    if let Err(error) = console.handle_input(input).await {
+                        let _ = event_tx.send(ViewerEvent::Status(format!(
+                            "Input forwarding failed: {error:#}"
+                        )));
+                    }
+                }
+                None => break,
+            }
+        }
     }
 
     drop(console);
@@ -126,6 +172,7 @@ fn run_window(
     target: &ConnectTarget,
     ready: &ViewerReady,
     event_rx: Receiver<ViewerEvent>,
+    input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -138,6 +185,7 @@ fn run_window(
     picture.set_can_shrink(true);
     picture.set_content_fit(gtk::ContentFit::Contain);
     picture.set_visible(false);
+    picture.set_focusable(true);
 
     let status_label = gtk::Label::new(Some("Waiting for framebuffer..."));
     status_label.set_wrap(true);
@@ -159,12 +207,22 @@ fn run_window(
         .build();
     window.set_resizable(true);
 
+    let ui_state = Rc::new(RefCell::new(UiState::default()));
+    install_input_controllers(
+        &picture,
+        ui_state.clone(),
+        input_tx,
+        ready.mouse_mode,
+        ready.keyboard_available,
+    );
+
     let event_rx = Rc::new(RefCell::new(event_rx));
     let window_base_title = ready.title.clone();
     glib::timeout_add_local(FRAME_POLL_INTERVAL, {
         let event_rx = event_rx.clone();
         let picture = picture.clone();
         let status_label = status_label.clone();
+        let ui_state = ui_state.clone();
         let window = window.clone();
         let vm_name = target.vm_name.clone();
         let window_base_title = window_base_title.clone();
@@ -204,6 +262,11 @@ fn run_window(
                 picture.set_paintable(Some(&texture));
                 picture.set_visible(true);
                 status_label.set_visible(false);
+                let mut ui_state = ui_state.borrow_mut();
+                if ui_state.frame_size != Some((frame.width, frame.height)) {
+                    ui_state.last_pointer_guest_position = None;
+                }
+                ui_state.frame_size = Some((frame.width, frame.height));
                 window.set_title(Some(&format!(
                     "{} - {}x{}",
                     window_base_title, frame.width, frame.height
@@ -233,6 +296,7 @@ fn run_window(
     });
 
     window.present();
+    picture.grab_focus();
     main_loop.run();
     Ok(())
 }
@@ -241,12 +305,38 @@ struct ViewerReady {
     title: String,
     width: u32,
     height: u32,
+    keyboard_available: bool,
+    mouse_mode: MouseMode,
+}
+
+#[derive(Default)]
+struct UiState {
+    frame_size: Option<(u32, u32)>,
+    last_pointer_guest_position: Option<(u32, u32)>,
 }
 
 enum ViewerEvent {
     Frame(FrameSnapshot),
     Status(String),
     Disconnected,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum MouseMode {
+    Disabled,
+    Relative,
+    Absolute,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum InputEvent {
+    KeyPress(u32),
+    KeyRelease(u32),
+    MousePress(MouseButton),
+    MouseRelease(MouseButton),
+    MouseAbs { x: u32, y: u32 },
+    MouseRel { dx: i32, dy: i32 },
+    MouseWheel(MouseButton),
 }
 
 #[derive(Clone)]
@@ -547,6 +637,8 @@ impl TryFrom<u32> for PixelFormat {
 
 struct RemoteConsole {
     proxy: ConsoleProxy<'static>,
+    keyboard: KeyboardProxy<'static>,
+    mouse: MouseProxy<'static>,
     listener_connection: Option<Connection>,
 }
 
@@ -556,15 +648,81 @@ impl RemoteConsole {
             OwnedObjectPath::try_from(format!("/org/qemu/Display1/Console_{console_id}"))?;
         let proxy = ConsoleProxy::builder(connection)
             .destination(owner.to_owned())?
-            .path(object_path)?
+            .path(object_path.clone())?
             .build()
             .await
             .with_context(|| format!("failed to build the console proxy for owner `{owner}`"))?;
+        let keyboard = KeyboardProxy::builder(connection)
+            .destination(owner.to_owned())?
+            .path(object_path.clone())?
+            .build()
+            .await
+            .with_context(|| format!("failed to build the keyboard proxy for owner `{owner}`"))?;
+        let mouse = MouseProxy::builder(connection)
+            .destination(owner.to_owned())?
+            .path(object_path)?
+            .build()
+            .await
+            .with_context(|| format!("failed to build the mouse proxy for owner `{owner}`"))?;
 
         Ok(Self {
             proxy,
+            keyboard,
+            mouse,
             listener_connection: None,
         })
+    }
+
+    async fn mouse_is_absolute(&self) -> Result<bool> {
+        self.mouse
+            .is_absolute()
+            .await
+            .context("failed to query the mouse mode")
+    }
+
+    async fn handle_input(&self, input: InputEvent) -> Result<()> {
+        match input {
+            InputEvent::KeyPress(keycode) => self
+                .keyboard
+                .press(keycode)
+                .await
+                .with_context(|| format!("failed to send key press for qnum {keycode}")),
+            InputEvent::KeyRelease(keycode) => self
+                .keyboard
+                .release(keycode)
+                .await
+                .with_context(|| format!("failed to send key release for qnum {keycode}")),
+            InputEvent::MousePress(button) => self
+                .mouse
+                .press(button)
+                .await
+                .with_context(|| format!("failed to send mouse press for {button:?}")),
+            InputEvent::MouseRelease(button) => self
+                .mouse
+                .release(button)
+                .await
+                .with_context(|| format!("failed to send mouse release for {button:?}")),
+            InputEvent::MouseAbs { x, y } => self
+                .mouse
+                .set_abs_position(x, y)
+                .await
+                .with_context(|| format!("failed to move the absolute mouse to {x},{y}")),
+            InputEvent::MouseRel { dx, dy } => self
+                .mouse
+                .rel_motion(dx, dy)
+                .await
+                .with_context(|| format!("failed to move the relative mouse by {dx},{dy}")),
+            InputEvent::MouseWheel(button) => {
+                self.mouse
+                    .press(button)
+                    .await
+                    .with_context(|| format!("failed to send mouse wheel press for {button:?}"))?;
+                self.mouse
+                    .release(button)
+                    .await
+                    .with_context(|| format!("failed to send mouse wheel release for {button:?}"))
+            }
+        }
     }
 
     async fn register_listener<H: ConsoleListenerHandler>(&mut self, handler: H) -> Result<()> {
@@ -719,6 +877,397 @@ impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
     }
 }
 
+fn install_input_controllers(
+    picture: &gtk::Picture,
+    ui_state: Rc<RefCell<UiState>>,
+    input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
+    mouse_mode: MouseMode,
+    keyboard_available: bool,
+) {
+    if keyboard_available {
+        let key_controller = gtk::EventControllerKey::new();
+        key_controller.connect_key_pressed({
+            let input_tx = input_tx.clone();
+            move |_, _, keycode, _| match gdk_keycode_to_qnum(keycode) {
+                Some(qnum) => {
+                    let _ = input_tx.send(InputEvent::KeyPress(qnum));
+                    glib::Propagation::Stop
+                }
+                None => glib::Propagation::Proceed,
+            }
+        });
+        key_controller.connect_key_released({
+            let input_tx = input_tx.clone();
+            move |_, _, keycode, _| {
+                if let Some(qnum) = gdk_keycode_to_qnum(keycode) {
+                    let _ = input_tx.send(InputEvent::KeyRelease(qnum));
+                }
+            }
+        });
+        picture.add_controller(key_controller);
+    }
+
+    if mouse_mode == MouseMode::Disabled {
+        return;
+    }
+
+    let click = gtk::GestureClick::new();
+    click.set_button(0);
+    click.connect_pressed({
+        let picture = picture.clone();
+        let ui_state = ui_state.clone();
+        let input_tx = input_tx.clone();
+        move |gesture, _, x, y| {
+            picture.grab_focus();
+            sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y);
+
+            if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
+                let _ = input_tx.send(InputEvent::MousePress(button));
+            }
+        }
+    });
+    click.connect_released({
+        let picture = picture.clone();
+        let ui_state = ui_state.clone();
+        let input_tx = input_tx.clone();
+        move |gesture, _, x, y| {
+            sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y);
+
+            if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
+                let _ = input_tx.send(InputEvent::MouseRelease(button));
+            }
+        }
+    });
+    picture.add_controller(click);
+
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter({
+        let picture = picture.clone();
+        let ui_state = ui_state.clone();
+        let input_tx = input_tx.clone();
+        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y)
+    });
+    motion.connect_motion({
+        let picture = picture.clone();
+        let ui_state = ui_state.clone();
+        let input_tx = input_tx.clone();
+        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y)
+    });
+    motion.connect_leave({
+        let ui_state = ui_state.clone();
+        move |_| {
+            ui_state.borrow_mut().last_pointer_guest_position = None;
+        }
+    });
+    picture.add_controller(motion);
+
+    let scroll = gtk::EventControllerScroll::new(
+        gtk::EventControllerScrollFlags::BOTH_AXES | gtk::EventControllerScrollFlags::DISCRETE,
+    );
+    scroll.connect_scroll({
+        let input_tx = input_tx.clone();
+        move |_, dx, dy| {
+            let handled = emit_scroll_buttons(&input_tx, dx, dy);
+            if handled {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        }
+    });
+    picture.add_controller(scroll);
+}
+
+fn sync_mouse_position(
+    picture: &gtk::Picture,
+    ui_state: &Rc<RefCell<UiState>>,
+    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+    mouse_mode: MouseMode,
+    x: f64,
+    y: f64,
+) {
+    let frame_size = ui_state.borrow().frame_size;
+    let Some((frame_width, frame_height)) = frame_size else {
+        return;
+    };
+    let Some((guest_x, guest_y)) = widget_coords_to_guest_position(
+        picture.width(),
+        picture.height(),
+        frame_width,
+        frame_height,
+        x,
+        y,
+    ) else {
+        ui_state.borrow_mut().last_pointer_guest_position = None;
+        return;
+    };
+
+    let mut ui_state = ui_state.borrow_mut();
+    match mouse_mode {
+        MouseMode::Disabled => {}
+        MouseMode::Absolute => {
+            let _ = input_tx.send(InputEvent::MouseAbs {
+                x: guest_x,
+                y: guest_y,
+            });
+            ui_state.last_pointer_guest_position = Some((guest_x, guest_y));
+        }
+        MouseMode::Relative => {
+            if let Some((prev_x, prev_y)) = ui_state.last_pointer_guest_position {
+                let dx = guest_x as i32 - prev_x as i32;
+                let dy = guest_y as i32 - prev_y as i32;
+                if dx != 0 || dy != 0 {
+                    let _ = input_tx.send(InputEvent::MouseRel { dx, dy });
+                }
+            }
+            ui_state.last_pointer_guest_position = Some((guest_x, guest_y));
+        }
+    }
+}
+
+fn emit_scroll_buttons(
+    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+    _dx: f64,
+    dy: f64,
+) -> bool {
+    let mut handled = false;
+
+    for _ in 0..scroll_ticks(dy).unsigned_abs() {
+        let button = if dy.is_sign_positive() {
+            MouseButton::WheelDown
+        } else {
+            MouseButton::WheelUp
+        };
+        let _ = input_tx.send(InputEvent::MouseWheel(button));
+        handled = true;
+    }
+
+    handled
+}
+
+fn scroll_ticks(delta: f64) -> i32 {
+    if delta.abs() < f64::EPSILON {
+        0
+    } else {
+        let rounded = delta.round() as i32;
+        if rounded == 0 {
+            delta.signum() as i32
+        } else {
+            rounded
+        }
+    }
+}
+
+fn gtk_button_to_qemu(button: u32) -> Option<MouseButton> {
+    match button {
+        1 => Some(MouseButton::Left),
+        2 => Some(MouseButton::Middle),
+        3 => Some(MouseButton::Right),
+        8 => Some(MouseButton::Side),
+        9 => Some(MouseButton::Extra),
+        _ => None,
+    }
+}
+
+fn widget_coords_to_guest_position(
+    widget_width: i32,
+    widget_height: i32,
+    frame_width: u32,
+    frame_height: u32,
+    x: f64,
+    y: f64,
+) -> Option<(u32, u32)> {
+    if widget_width <= 0 || widget_height <= 0 || frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+
+    let widget_width = f64::from(widget_width);
+    let widget_height = f64::from(widget_height);
+    let frame_width_f = f64::from(frame_width);
+    let frame_height_f = f64::from(frame_height);
+    let scale = (widget_width / frame_width_f).min(widget_height / frame_height_f);
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+
+    let display_width = frame_width_f * scale;
+    let display_height = frame_height_f * scale;
+    let x_offset = (widget_width - display_width) / 2.0;
+    let y_offset = (widget_height - display_height) / 2.0;
+    let local_x = x - x_offset;
+    let local_y = y - y_offset;
+    if local_x < 0.0 || local_y < 0.0 || local_x > display_width || local_y > display_height {
+        return None;
+    }
+
+    let guest_x = (local_x / scale)
+        .floor()
+        .clamp(0.0, f64::from(frame_width.saturating_sub(1))) as u32;
+    let guest_y = (local_y / scale)
+        .floor()
+        .clamp(0.0, f64::from(frame_height.saturating_sub(1))) as u32;
+
+    Some((guest_x, guest_y))
+}
+
+fn gdk_keycode_to_qnum(keycode: u32) -> Option<u32> {
+    keycode.checked_sub(8).and_then(linux_keycode_to_qnum)
+}
+
+fn linux_keycode_to_qnum(linux_keycode: u32) -> Option<u32> {
+    let qnum = match linux_keycode {
+        1..=83 => linux_keycode,
+        85 => 118,
+        86..=88 => linux_keycode,
+        89 => 115,
+        90 => 120,
+        91 => 119,
+        92 => 121,
+        93 => 112,
+        94 => 123,
+        95 => 92,
+        96 => 156,
+        97 => 157,
+        98 => 181,
+        99 => 183,
+        100 => 184,
+        101 => 91,
+        102 => 199,
+        103 => 200,
+        104 => 201,
+        105 => 203,
+        106 => 205,
+        107 => 207,
+        108 => 208,
+        109 => 209,
+        110 => 210,
+        111 => 211,
+        112 => 239,
+        113 => 160,
+        114 => 174,
+        115 => 176,
+        116 => 222,
+        117 => 89,
+        118 => 206,
+        119 => 198,
+        120 => 139,
+        121 => 126,
+        122 => 114,
+        123 => 113,
+        124 => 125,
+        125 => 219,
+        126 => 220,
+        127 => 221,
+        128 => 232,
+        129 => 133,
+        130 => 134,
+        131 => 135,
+        132 => 140,
+        133 => 248,
+        134 => 100,
+        135 => 101,
+        136 => 193,
+        137 => 188,
+        138 => 245,
+        139 => 158,
+        140 => 161,
+        141 => 102,
+        142 => 223,
+        143 => 227,
+        144 => 103,
+        145 => 104,
+        146 => 105,
+        147 => 147,
+        148 => 159,
+        149 => 151,
+        150 => 130,
+        151 => 106,
+        152 => 146,
+        153 => 107,
+        154 => 166,
+        155 => 236,
+        156 => 230,
+        157 => 235,
+        158 => 234,
+        159 => 233,
+        160 => 163,
+        161 => 108,
+        162 => 253,
+        163 => 153,
+        164 => 162,
+        165 => 144,
+        166 => 164,
+        167 => 177,
+        168 => 152,
+        169 => 99,
+        171 => 129,
+        172 => 178,
+        173 => 231,
+        176 => 136,
+        177 => 117,
+        178 => 143,
+        179 => 246,
+        180 => 251,
+        181 => 137,
+        182 => 138,
+        183 => 93,
+        184 => 94,
+        185 => 95,
+        186 => 85,
+        187 => 131,
+        188 => 247,
+        189 => 132,
+        190 => 90,
+        191 => 116,
+        192 => 249,
+        193 => 109,
+        194 => 111,
+        200 => 168,
+        201 => 169,
+        202 => 171,
+        203 => 172,
+        204 => 173,
+        205 => 165,
+        206 => 175,
+        207 => 179,
+        208 => 180,
+        209 => 182,
+        210 => 185,
+        211 => 186,
+        212 => 187,
+        213 => 189,
+        214 => 190,
+        215 => 191,
+        216 => 192,
+        217 => 229,
+        218 => 194,
+        219 => 195,
+        220 => 196,
+        221 => 197,
+        222 => 148,
+        223 => 202,
+        224 => 204,
+        225 => 212,
+        226 => 237,
+        227 => 214,
+        228 => 215,
+        229 => 216,
+        230 => 217,
+        231 => 218,
+        232 => 228,
+        233 => 142,
+        234 => 213,
+        235 => 240,
+        236 => 241,
+        237 => 242,
+        238 => 243,
+        239 => 244,
+        _ => return None,
+    };
+
+    Some(qnum)
+}
+
 fn suggested_window_size(width: u32, height: u32) -> (i32, i32) {
     let width = width.clamp(640, 1280);
     let height = height.clamp(480, 960);
@@ -730,7 +1279,7 @@ fn suggested_window_size(width: u32, height: u32) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Framebuffer, PixelFormat};
+    use super::{Framebuffer, PixelFormat, linux_keycode_to_qnum, widget_coords_to_guest_position};
     use qemu_display::Scanout;
 
     #[test]
@@ -786,6 +1335,29 @@ mod tests {
         assert_eq!(
             snapshot.data,
             vec![0x11, 0x22, 0x33, 0xff, 0x44, 0x55, 0x66, 0xff]
+        );
+    }
+
+    #[test]
+    fn extended_linux_keycodes_are_translated_to_qnum() {
+        assert_eq!(linux_keycode_to_qnum(97), Some(157));
+        assert_eq!(linux_keycode_to_qnum(103), Some(200));
+        assert_eq!(linux_keycode_to_qnum(125), Some(219));
+    }
+
+    #[test]
+    fn widget_coordinates_account_for_letterboxing() {
+        assert_eq!(
+            widget_coords_to_guest_position(800, 600, 640, 480, 400.0, 300.0),
+            Some((320, 240))
+        );
+        assert_eq!(
+            widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 74.0),
+            None
+        );
+        assert_eq!(
+            widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 300.0),
+            Some((320, 180))
         );
     }
 }
