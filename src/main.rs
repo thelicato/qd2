@@ -1,5 +1,6 @@
 mod cli;
 mod qemu;
+mod viewer;
 
 use anyhow::Result;
 use clap::Parser;
@@ -20,6 +21,13 @@ async fn main() -> Result<()> {
             let report = qemu::inspect(args.address(), args.vm.as_deref()).await?;
             print_warnings(&report.warnings);
             print_inspection(&report);
+        }
+        Command::Connect(args) => {
+            let target =
+                qemu::resolve_connect_target(args.address(), args.vm.as_deref(), args.console)
+                    .await?;
+            print_warnings(&target.warnings);
+            viewer::connect(target)?;
         }
     }
 

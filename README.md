@@ -4,11 +4,14 @@ QD2 stands for QEMU D-Bus Display. It is a Rust CLI for discovering and connecti
 
 ## Current status
 
-This first step focuses on discovery and inspection:
+The current implementation covers discovery, inspection, and a first graphical viewer:
 
 - `qd2 list` enumerates visible QEMU D-Bus VMs on the session bus and common libvirt private D-Bus socket directories.
 - `qd2 inspect` shows VM metadata, console details, and exported helper interfaces.
+- `qd2 connect` opens a GTK4 window for one console and renders the raw framebuffer stream.
 - `--address <DBUS_ADDRESS>` connects to a custom D-Bus bus instead of the session bus.
+- `qd2 connect` currently supports the raw framebuffer listener path; DMABUF rendering is not implemented yet.
+- Keyboard and mouse forwarding are not wired into `qd2 connect` yet.
 
 ## Example
 
@@ -19,6 +22,7 @@ cargo run -- inspect --vm :1.421
 cargo run -- inspect --vm demo-vm
 cargo run -- list --address "unix:path=/tmp/qemu-bus"
 cargo run -- inspect --address "unix:path=/run/libvirt/qemu/dbus/12-oscp-dbus.sock"
+cargo run -- connect --address "unix:path=/run/libvirt/qemu/dbus/12-oscp-dbus.sock"
 ```
 
 ## References

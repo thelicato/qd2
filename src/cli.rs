@@ -17,6 +17,8 @@ pub enum Command {
     List(BusArgs),
     /// Inspect one QEMU D-Bus VM and its exported objects.
     Inspect(InspectArgs),
+    /// Open a GTK4 window for one QEMU D-Bus console.
+    Connect(ConnectArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -37,6 +39,26 @@ pub struct InspectArgs {
 }
 
 impl InspectArgs {
+    pub fn address(&self) -> Option<&str> {
+        self.bus.address.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ConnectArgs {
+    #[command(flatten)]
+    pub bus: BusArgs,
+
+    /// VM selector: matches the QEMU VM name, UUID, or D-Bus owner.
+    #[arg(long, short = 'v', value_name = "NAME|UUID|OWNER")]
+    pub vm: Option<String>,
+
+    /// Console ID to open. Defaults to the first reported console.
+    #[arg(long, short = 'c', value_name = "CONSOLE_ID")]
+    pub console: Option<u32>,
+}
+
+impl ConnectArgs {
     pub fn address(&self) -> Option<&str> {
         self.bus.address.as_deref()
     }

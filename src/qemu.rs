@@ -66,6 +66,18 @@ pub struct InspectionReport {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConnectTarget {
+    pub source_address: Option<String>,
+    pub owner: String,
+    pub vm_name: String,
+    pub console_id: u32,
+    pub console_label: String,
+    pub width: u32,
+    pub height: u32,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConsoleSummary {
     pub id: u32,
     pub label: String,
@@ -170,7 +182,27 @@ pub async fn inspect(address: Option<&str>, selector: Option<&str>) -> Result<In
     })
 }
 
-async fn connect(address: Option<&str>) -> Result<Connection> {
+pub async fn resolve_connect_target(
+    address: Option<&str>,
+    selector: Option<&str>,
+    console_id: Option<u32>,
+) -> Result<ConnectTarget> {
+    let report = inspect(address, selector).await?;
+    let console = select_console(&report, console_id)?;
+
+    Ok(ConnectTarget {
+        source_address: report.vm.source_address.clone(),
+        owner: report.vm.owner.as_str().to_owned(),
+        vm_name: report.vm.name.clone(),
+        console_id: console.id,
+        console_label: console.label.clone(),
+        width: console.width,
+        height: console.height,
+        warnings: report.warnings,
+    })
+}
+
+pub(crate) async fn connect(address: Option<&str>) -> Result<Connection> {
     match address {
         Some(address) => {
             let builder = zbus::connection::Builder::address(address)
@@ -332,12 +364,51 @@ fn select_vm(discovery: &Discovery, selector: Option<&str>) -> Result<VmSummary>
     }
 }
 
+fn select_console(report: &InspectionReport, console_id: Option<u32>) -> Result<ConsoleSummary> {
+    if report.consoles.is_empty() {
+        bail!(
+            "the VM `{}` on {} does not report any display consoles",
+            report.vm.name,
+            report.bus_label
+        );
+    }
+
+    match console_id {
+        Some(console_id) => report
+            .consoles
+            .iter()
+            .find(|console| console.id == console_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "console {console_id} was not found on VM `{}`.\nAvailable consoles:\n{}",
+                    report.vm.name,
+                    format_console_choices(&report.consoles)
+                )
+            }),
+        None => Ok(report.consoles[0].clone()),
+    }
+}
+
 fn format_vm_choices(vms: &[VmSummary]) -> String {
     vms.iter()
         .map(|vm| {
             format!(
                 "- {} | {} | {} | {}",
                 vm.name, vm.uuid, vm.owner, vm.source_label
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_console_choices(consoles: &[ConsoleSummary]) -> String {
+    consoles
+        .iter()
+        .map(|console| {
+            format!(
+                "- {} | {} | {}x{}",
+                console.id, console.label, console.width, console.height
             )
         })
         .collect::<Vec<_>>()
