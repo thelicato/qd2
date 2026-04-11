@@ -40,6 +40,7 @@ const PIXMAN_R8G8B8A8: u32 = pixman_format_code_t_PIXMAN_r8g8b8a8;
 const PIXMAN_R8G8B8X8: u32 = pixman_format_code_t_PIXMAN_r8g8b8x8;
 const PIXMAN_X8B8G8R8: u32 = pixman_format_code_t_PIXMAN_x8b8g8r8;
 const PIXMAN_X8R8G8B8: u32 = pixman_format_code_t_PIXMAN_x8r8g8b8;
+const RGBA_BYTES_PER_PIXEL: usize = 4;
 
 pub fn connect(target: ConnectTarget) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
@@ -196,7 +197,7 @@ fn run_window(
                 let texture = gdk::MemoryTexture::new(
                     i32::try_from(frame.width).unwrap_or(i32::MAX),
                     i32::try_from(frame.height).unwrap_or(i32::MAX),
-                    frame.format.to_gdk_memory_format(),
+                    gdk::MemoryFormat::R8g8b8a8,
                     &bytes,
                     frame.stride,
                 );
@@ -253,7 +254,6 @@ struct FrameSnapshot {
     width: u32,
     height: u32,
     stride: usize,
-    format: PixelFormat,
     data: Vec<u8>,
 }
 
@@ -346,9 +346,13 @@ impl Framebuffer {
         FrameSnapshot {
             width: self.width,
             height: self.height,
-            stride: self.stride,
-            format: self.format,
-            data: self.data.clone(),
+            stride: self.width as usize * RGBA_BYTES_PER_PIXEL,
+            data: self.format.to_rgba_bytes(
+                self.width as usize,
+                self.height as usize,
+                self.stride,
+                &self.data,
+            ),
         }
     }
 }
@@ -454,7 +458,7 @@ enum PixelFormat {
 
 impl PixelFormat {
     fn bytes_per_pixel(self) -> usize {
-        4
+        RGBA_BYTES_PER_PIXEL
     }
 
     fn pixman_code(self) -> u32 {
@@ -470,16 +474,55 @@ impl PixelFormat {
         }
     }
 
-    fn to_gdk_memory_format(self) -> gdk::MemoryFormat {
-        match self {
-            Self::A8b8g8r8 => gdk::MemoryFormat::A8b8g8r8,
-            Self::A8r8g8b8 => gdk::MemoryFormat::A8r8g8b8,
-            Self::B8g8r8a8 => gdk::MemoryFormat::B8g8r8a8,
-            Self::B8g8r8x8 => gdk::MemoryFormat::B8g8r8x8,
-            Self::R8g8b8a8 => gdk::MemoryFormat::R8g8b8a8,
-            Self::R8g8b8x8 => gdk::MemoryFormat::R8g8b8x8,
-            Self::X8b8g8r8 => gdk::MemoryFormat::X8b8g8r8,
-            Self::X8r8g8b8 => gdk::MemoryFormat::X8r8g8b8,
+    fn to_rgba_bytes(self, width: usize, height: usize, stride: usize, data: &[u8]) -> Vec<u8> {
+        let mut rgba = vec![0; width * height * RGBA_BYTES_PER_PIXEL];
+
+        for y in 0..height {
+            let src_row_start = y * stride;
+            let dst_row_start = y * width * RGBA_BYTES_PER_PIXEL;
+            let src_row = &data[src_row_start..src_row_start + width * self.bytes_per_pixel()];
+            let dst_row = &mut rgba[dst_row_start..dst_row_start + width * RGBA_BYTES_PER_PIXEL];
+
+            for (src, dst) in src_row
+                .chunks_exact(self.bytes_per_pixel())
+                .zip(dst_row.chunks_exact_mut(RGBA_BYTES_PER_PIXEL))
+            {
+                dst.copy_from_slice(&self.pixel_to_rgba(src));
+            }
+        }
+
+        rgba
+    }
+
+    fn pixel_to_rgba(self, src: &[u8]) -> [u8; RGBA_BYTES_PER_PIXEL] {
+        debug_assert_eq!(src.len(), self.bytes_per_pixel());
+
+        #[cfg(target_endian = "little")]
+        {
+            match self {
+                Self::A8b8g8r8 => [src[0], src[1], src[2], src[3]],
+                Self::A8r8g8b8 => [src[2], src[1], src[0], src[3]],
+                Self::B8g8r8a8 => [src[1], src[2], src[3], src[0]],
+                Self::B8g8r8x8 => [src[1], src[2], src[3], u8::MAX],
+                Self::R8g8b8a8 => [src[3], src[2], src[1], src[0]],
+                Self::R8g8b8x8 => [src[3], src[2], src[1], u8::MAX],
+                Self::X8b8g8r8 => [src[0], src[1], src[2], u8::MAX],
+                Self::X8r8g8b8 => [src[2], src[1], src[0], u8::MAX],
+            }
+        }
+
+        #[cfg(target_endian = "big")]
+        {
+            match self {
+                Self::A8b8g8r8 => [src[3], src[2], src[1], src[0]],
+                Self::A8r8g8b8 => [src[1], src[2], src[3], src[0]],
+                Self::B8g8r8a8 => [src[2], src[1], src[0], src[3]],
+                Self::B8g8r8x8 => [src[2], src[1], src[0], u8::MAX],
+                Self::R8g8b8a8 => [src[0], src[1], src[2], src[3]],
+                Self::R8g8b8x8 => [src[0], src[1], src[2], u8::MAX],
+                Self::X8b8g8r8 => [src[3], src[2], src[1], u8::MAX],
+                Self::X8r8g8b8 => [src[1], src[2], src[3], u8::MAX],
+            }
         }
     }
 }
@@ -683,4 +726,66 @@ fn suggested_window_size(width: u32, height: u32) -> (i32, i32) {
         i32::try_from(width).unwrap_or(1280),
         i32::try_from(height).unwrap_or(960),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Framebuffer, PixelFormat};
+    use qemu_display::Scanout;
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn snapshot_converts_xrgb_pixels_to_rgba() {
+        let framebuffer = Framebuffer::from_scanout(Scanout {
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: PixelFormat::X8r8g8b8.pixman_code(),
+            data: vec![0x10, 0x20, 0x30, 0x00],
+        })
+        .expect("x8r8g8b8 scanout should be accepted");
+
+        let snapshot = framebuffer.snapshot();
+        assert_eq!(snapshot.stride, 4);
+        assert_eq!(snapshot.data, vec![0x30, 0x20, 0x10, 0xff]);
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn snapshot_preserves_abgr_alpha() {
+        let framebuffer = Framebuffer::from_scanout(Scanout {
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: PixelFormat::A8b8g8r8.pixman_code(),
+            data: vec![0x12, 0x34, 0x56, 0x78],
+        })
+        .expect("a8b8g8r8 scanout should be accepted");
+
+        let snapshot = framebuffer.snapshot();
+        assert_eq!(snapshot.data, vec![0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn snapshot_respects_framebuffer_stride() {
+        let framebuffer = Framebuffer::from_scanout(Scanout {
+            width: 1,
+            height: 2,
+            stride: 8,
+            format: PixelFormat::B8g8r8x8.pixman_code(),
+            data: vec![
+                0x00, 0x11, 0x22, 0x33, 0xaa, 0xbb, 0xcc, 0xdd, 0x00, 0x44, 0x55, 0x66, 0xee, 0xff,
+                0x11, 0x22,
+            ],
+        })
+        .expect("b8g8r8x8 scanout should be accepted");
+
+        let snapshot = framebuffer.snapshot();
+        assert_eq!(snapshot.stride, 4);
+        assert_eq!(
+            snapshot.data,
+            vec![0x11, 0x22, 0x33, 0xff, 0x44, 0x55, 0x66, 0xff]
+        );
+    }
 }
