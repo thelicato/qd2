@@ -3,12 +3,15 @@ use std::{
     convert::TryFrom,
     rc::Rc,
     sync::mpsc::{self as std_mpsc, Receiver, Sender, SyncSender, TryRecvError},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
 use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 use pixman_sys::{
@@ -17,17 +20,20 @@ use pixman_sys::{
     pixman_format_code_t_PIXMAN_r8g8b8a8, pixman_format_code_t_PIXMAN_r8g8b8x8,
     pixman_format_code_t_PIXMAN_x8b8g8r8, pixman_format_code_t_PIXMAN_x8r8g8b8,
 };
-#[cfg(unix)]
-use qemu_display::ScanoutDMABUF;
 use qemu_display::{
-    ConsoleListenerHandler, ConsoleProxy, Cursor, KeyboardProxy, MouseButton, MouseProxy, MouseSet,
-    Scanout, Update, UpdateDMABUF,
+    ConsoleProxy, Cursor, KeyboardProxy, MouseButton, MouseProxy, MouseSet, Scanout, Update,
+    UpdateDMABUF,
 };
+#[cfg(unix)]
+use qemu_display::{ScanoutDMABUF, ScanoutMap, ScanoutMmap, UpdateMap};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use zbus::{
     Connection,
     zvariant::{Fd, OwnedObjectPath},
 };
+
+#[cfg(unix)]
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::qemu::{self, ConnectTarget};
 
@@ -108,7 +114,7 @@ async fn listener_main(
         .with_context(|| format!("failed to open console {}", target.console_id))?;
 
     console
-        .register_listener(FrameStreamHandler::new(event_tx.clone()))
+        .register_listener(event_tx.clone())
         .await
         .context("failed to register the QEMU display listener")?;
 
@@ -217,9 +223,11 @@ fn run_window(
     );
 
     let event_rx = Rc::new(RefCell::new(event_rx));
+    let display = gtk::prelude::RootExt::display(&window);
     let window_base_title = ready.title.clone();
     glib::timeout_add_local(FRAME_POLL_INTERVAL, {
         let event_rx = event_rx.clone();
+        let display = display.clone();
         let picture = picture.clone();
         let status_label = status_label.clone();
         let ui_state = ui_state.clone();
@@ -228,7 +236,9 @@ fn run_window(
         let window_base_title = window_base_title.clone();
 
         move || {
-            let mut latest_frame = None;
+            let mut latest_presentation = None;
+            #[cfg(unix)]
+            let mut dmabuf_updated = false;
             let mut latest_status = None;
             let mut disconnected = false;
 
@@ -239,7 +249,17 @@ fn run_window(
                 };
 
                 match event {
-                    Ok(ViewerEvent::Frame(frame)) => latest_frame = Some(frame),
+                    Ok(ViewerEvent::Frame(frame)) => {
+                        latest_presentation = Some(PresentationEvent::Frame(frame))
+                    }
+                    #[cfg(unix)]
+                    Ok(ViewerEvent::Dmabuf(scanout)) => {
+                        latest_presentation = Some(PresentationEvent::Dmabuf(scanout))
+                    }
+                    #[cfg(unix)]
+                    Ok(ViewerEvent::DmabufUpdate(_update)) => {
+                        dmabuf_updated = true;
+                    }
                     Ok(ViewerEvent::Status(message)) => latest_status = Some(message),
                     Ok(ViewerEvent::Disconnected) => disconnected = true,
                     Err(TryRecvError::Empty) => break,
@@ -250,27 +270,55 @@ fn run_window(
                 }
             }
 
-            if let Some(frame) = latest_frame {
-                let bytes = glib::Bytes::from_owned(frame.data);
-                let texture = gdk::MemoryTexture::new(
-                    i32::try_from(frame.width).unwrap_or(i32::MAX),
-                    i32::try_from(frame.height).unwrap_or(i32::MAX),
-                    gdk::MemoryFormat::R8g8b8a8,
-                    &bytes,
-                    frame.stride,
-                );
-                picture.set_paintable(Some(&texture));
-                picture.set_visible(true);
-                status_label.set_visible(false);
-                let mut ui_state = ui_state.borrow_mut();
-                if ui_state.frame_size != Some((frame.width, frame.height)) {
-                    ui_state.last_pointer_guest_position = None;
+            if let Some(presentation) = latest_presentation {
+                match presentation {
+                    PresentationEvent::Frame(frame) => {
+                        let bytes = glib::Bytes::from_owned(frame.data);
+                        let texture = gdk::MemoryTexture::new(
+                            i32::try_from(frame.width).unwrap_or(i32::MAX),
+                            i32::try_from(frame.height).unwrap_or(i32::MAX),
+                            gdk::MemoryFormat::R8g8b8a8,
+                            &bytes,
+                            frame.stride,
+                        );
+                        present_paintable(
+                            &picture,
+                            &status_label,
+                            &ui_state,
+                            &window,
+                            &window_base_title,
+                            &texture,
+                            frame.width,
+                            frame.height,
+                        );
+                    }
+                    #[cfg(unix)]
+                    PresentationEvent::Dmabuf(scanout) => {
+                        match build_dmabuf_paintable(&display, scanout) {
+                            Ok(paintable) => {
+                                present_paintable(
+                                    &picture,
+                                    &status_label,
+                                    &ui_state,
+                                    &window,
+                                    &window_base_title,
+                                    &paintable,
+                                    paintable.intrinsic_width().max(0) as u32,
+                                    paintable.intrinsic_height().max(0) as u32,
+                                );
+                            }
+                            Err(error) => {
+                                latest_status =
+                                    Some(format!("Could not import the DMABUF scanout: {error:#}"));
+                            }
+                        }
+                    }
                 }
-                ui_state.frame_size = Some((frame.width, frame.height));
-                window.set_title(Some(&format!(
-                    "{} - {}x{}",
-                    window_base_title, frame.width, frame.height
-                )));
+            }
+
+            #[cfg(unix)]
+            if dmabuf_updated {
+                picture.queue_draw();
             }
 
             if let Some(message) = latest_status {
@@ -301,6 +349,116 @@ fn run_window(
     Ok(())
 }
 
+enum PresentationEvent {
+    Frame(FrameSnapshot),
+    #[cfg(unix)]
+    Dmabuf(DmabufFrame),
+}
+
+fn present_paintable(
+    picture: &gtk::Picture,
+    status_label: &gtk::Label,
+    ui_state: &Rc<RefCell<UiState>>,
+    window: &gtk::Window,
+    window_base_title: &str,
+    paintable: &impl IsA<gdk::Paintable>,
+    width: u32,
+    height: u32,
+) {
+    picture.set_paintable(Some(paintable));
+    picture.set_visible(true);
+    status_label.set_visible(false);
+
+    let mut ui_state = ui_state.borrow_mut();
+    if ui_state.frame_size != Some((width, height)) {
+        ui_state.last_pointer_guest_position = None;
+    }
+    ui_state.frame_size = Some((width, height));
+
+    window.set_title(Some(&format!("{window_base_title} - {width}x{height}")));
+}
+
+#[cfg(target_os = "linux")]
+fn build_dmabuf_paintable(display: &gdk::Display, scanout: DmabufFrame) -> Result<gdk::Paintable> {
+    if !display
+        .dmabuf_formats()
+        .contains(scanout.fourcc, scanout.modifier)
+    {
+        bail!(
+            "GTK does not support DMABUF fourcc {:#x} with modifier {:#x}",
+            scanout.fourcc,
+            scanout.modifier
+        );
+    }
+
+    let plane_count = usize::try_from(scanout.num_planes).context("invalid DMABUF plane count")?;
+    if plane_count != scanout.fds.len() {
+        bail!(
+            "DMABUF reported {} planes but provided {} file descriptors",
+            scanout.num_planes,
+            scanout.fds.len()
+        );
+    }
+
+    let mut builder = gdk::DmabufTextureBuilder::new()
+        .set_display(display)
+        .set_width(scanout.width)
+        .set_height(scanout.height)
+        .set_fourcc(scanout.fourcc)
+        .set_modifier(scanout.modifier)
+        .set_n_planes(scanout.num_planes);
+
+    for plane in 0..plane_count {
+        builder = builder
+            .set_offset(plane as u32, scanout.offset[plane])
+            .set_stride(plane as u32, scanout.stride[plane]);
+
+        // SAFETY: the OwnedFds stay alive until GTK releases the imported texture.
+        builder = unsafe { builder.set_fd(plane as u32, scanout.fds[plane].as_raw_fd()) };
+    }
+
+    let y0_top = scanout.y0_top;
+    let width = scanout.width;
+    let height = scanout.height;
+    let texture = unsafe { builder.build_with_release_func(move || drop(scanout.fds)) }
+        .context("GTK rejected the DMABUF scanout")?;
+
+    texture_to_paintable(&texture, width, height, y0_top)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn build_dmabuf_paintable(
+    _display: &gdk::Display,
+    _scanout: DmabufFrame,
+) -> Result<gdk::Paintable> {
+    bail!("DMABUF import is currently supported only on Linux GTK builds")
+}
+
+#[cfg(unix)]
+fn texture_to_paintable(
+    texture: &gdk::Texture,
+    width: u32,
+    height: u32,
+    y0_top: bool,
+) -> Result<gdk::Paintable> {
+    let snapshot = gtk::Snapshot::new();
+    let bounds = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+
+    if y0_top {
+        snapshot.append_texture(texture, &bounds);
+    } else {
+        snapshot.save();
+        snapshot.translate(&gtk::graphene::Point::new(0.0, height as f32));
+        snapshot.scale(1.0, -1.0);
+        snapshot.append_texture(texture, &bounds);
+        snapshot.restore();
+    }
+
+    snapshot
+        .to_paintable(Some(&gtk::graphene::Size::new(width as f32, height as f32)))
+        .context("failed to build a GTK paintable for the DMABUF texture")
+}
+
 struct ViewerReady {
     title: String,
     width: u32,
@@ -317,6 +475,10 @@ struct UiState {
 
 enum ViewerEvent {
     Frame(FrameSnapshot),
+    #[cfg(unix)]
+    Dmabuf(DmabufFrame),
+    #[cfg(unix)]
+    DmabufUpdate(UpdateDMABUF),
     Status(String),
     Disconnected,
 }
@@ -347,21 +509,91 @@ struct FrameSnapshot {
     data: Vec<u8>,
 }
 
+#[cfg(unix)]
+struct DmabufFrame {
+    fds: Vec<OwnedFd>,
+    width: u32,
+    height: u32,
+    offset: [u32; 4],
+    stride: [u32; 4],
+    fourcc: u32,
+    modifier: u64,
+    y0_top: bool,
+    num_planes: u32,
+}
+
+#[cfg(unix)]
+impl DmabufFrame {
+    fn try_from_scanout(scanout: ScanoutDMABUF) -> Result<Self> {
+        let width = scanout.width;
+        let height = scanout.height;
+        let offset = scanout.offset;
+        let stride = scanout.stride;
+        let fourcc = scanout.fourcc;
+        let modifier = scanout.modifier;
+        let y0_top = scanout.y0_top;
+        let num_planes = scanout.num_planes;
+        let plane_count = usize::try_from(num_planes).context("invalid DMABUF plane count")?;
+        if plane_count == 0 || plane_count > 4 {
+            bail!("DMABUF plane count {} is not supported", num_planes);
+        }
+
+        let raw_fds = scanout.into_raw_fds();
+        let mut fds = Vec::with_capacity(plane_count);
+        for (index, raw_fd) in raw_fds.into_iter().take(plane_count).enumerate() {
+            if raw_fd < 0 {
+                bail!("DMABUF plane {index} did not provide a valid file descriptor");
+            }
+
+            // SAFETY: QEMU passed ownership of the duplicated DMABUF FDs to us.
+            fds.push(unsafe { OwnedFd::from_raw_fd(raw_fd) });
+        }
+
+        Ok(Self {
+            fds,
+            width,
+            height,
+            offset,
+            stride,
+            fourcc,
+            modifier,
+            y0_top,
+            num_planes,
+        })
+    }
+}
+
+#[derive(Copy, Clone)]
+struct FrameRect {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+#[cfg(unix)]
+struct MappedFramebuffer {
+    mmap: ScanoutMmap,
+}
+
 struct Framebuffer {
     width: u32,
     height: u32,
-    stride: usize,
+    source_stride: usize,
     format: PixelFormat,
-    data: Vec<u8>,
+    rgba: Vec<u8>,
+    #[cfg(unix)]
+    mapped: Option<MappedFramebuffer>,
 }
 
 impl Framebuffer {
     fn from_scanout(scanout: Scanout) -> Result<Self> {
         let format = PixelFormat::try_from(scanout.format)?;
-        let stride = usize::try_from(scanout.stride).context("invalid framebuffer stride")?;
+        let source_stride =
+            usize::try_from(scanout.stride).context("invalid framebuffer stride")?;
         let expected_len = usize::try_from(scanout.height)
             .context("invalid framebuffer height")?
-            .checked_mul(stride)
+            .checked_mul(source_stride)
             .context("framebuffer size overflow")?;
 
         if scanout.data.len() < expected_len {
@@ -373,13 +605,66 @@ impl Framebuffer {
             );
         }
 
-        Ok(Self {
+        let rgba_len = usize::try_from(scanout.width)
+            .context("invalid framebuffer width")?
+            .checked_mul(usize::try_from(scanout.height).context("invalid framebuffer height")?)
+            .and_then(|pixels| pixels.checked_mul(RGBA_BYTES_PER_PIXEL))
+            .context("RGBA framebuffer size overflow")?;
+        let mut framebuffer = Self {
             width: scanout.width,
             height: scanout.height,
-            stride,
+            source_stride,
             format,
-            data: scanout.data,
-        })
+            rgba: vec![0; rgba_len],
+            #[cfg(unix)]
+            mapped: None,
+        };
+        framebuffer.blit_frame_from_linear(&scanout.data)?;
+        Ok(framebuffer)
+    }
+
+    #[cfg(unix)]
+    fn from_map(scanout: ScanoutMap) -> Result<Self> {
+        let format = PixelFormat::try_from(scanout.format)?;
+        let source_stride =
+            usize::try_from(scanout.stride).context("invalid mapped framebuffer stride")?;
+        let expected_len = usize::try_from(scanout.height)
+            .context("invalid mapped framebuffer height")?
+            .checked_mul(source_stride)
+            .context("mapped framebuffer size overflow")?;
+        let rgba_len = usize::try_from(scanout.width)
+            .context("invalid mapped framebuffer width")?
+            .checked_mul(
+                usize::try_from(scanout.height).context("invalid mapped framebuffer height")?,
+            )
+            .and_then(|pixels| pixels.checked_mul(RGBA_BYTES_PER_PIXEL))
+            .context("mapped RGBA framebuffer size overflow")?;
+
+        let width = scanout.width;
+        let height = scanout.height;
+        let mmap = scanout
+            .mmap()
+            .context("failed to map the shared framebuffer")?;
+
+        if mmap.as_ref().len() < expected_len {
+            bail!(
+                "mapped framebuffer is too short for {}x{} stride {}",
+                width,
+                height,
+                source_stride
+            );
+        }
+
+        let mut framebuffer = Self {
+            width,
+            height,
+            source_stride,
+            format,
+            rgba: vec![0; rgba_len],
+            mapped: Some(MappedFramebuffer { mmap }),
+        };
+        framebuffer.refresh_full_mapped_frame()?;
+        Ok(framebuffer)
     }
 
     fn apply_update(&mut self, update: Update) -> Result<()> {
@@ -392,65 +677,220 @@ impl Framebuffer {
             );
         }
 
-        let x = usize::try_from(update.x).context("negative update x coordinate")?;
-        let y = usize::try_from(update.y).context("negative update y coordinate")?;
-        let width = usize::try_from(update.w).context("negative update width")?;
-        let height = usize::try_from(update.h).context("negative update height")?;
+        let rect = self.validate_rect(update.x, update.y, update.w, update.h)?;
         let src_stride = usize::try_from(update.stride).context("invalid update stride")?;
-        let row_len = width
-            .checked_mul(self.format.bytes_per_pixel())
-            .context("update row size overflow")?;
+        self.blit_update_from_linear(rect, src_stride, &update.data)
+    }
 
-        for row in 0..height {
-            let src_start = row
-                .checked_mul(src_stride)
-                .context("update source offset overflow")?;
-            let src_end = src_start
-                .checked_add(row_len)
-                .context("update source range overflow")?;
-            let dst_start = y
-                .checked_add(row)
-                .context("update destination y overflow")?
-                .checked_mul(self.stride)
-                .context("update destination row overflow")?
-                .checked_add(
-                    x.checked_mul(self.format.bytes_per_pixel())
-                        .context("update destination x overflow")?,
-                )
-                .context("update destination offset overflow")?;
-            let dst_end = dst_start
-                .checked_add(row_len)
-                .context("update destination range overflow")?;
+    #[cfg(unix)]
+    fn refresh_mapped_region(&mut self, update: UpdateMap) -> Result<()> {
+        let rect = self.validate_rect(update.x, update.y, update.w, update.h)?;
+        let mapped = self
+            .mapped
+            .as_ref()
+            .context("received a shared-memory update without a shared-memory scanout")?;
+        let format = self.format;
+        let source_stride = self.source_stride;
+        let rgba_stride = self.rgba_stride();
+        let rgba = &mut self.rgba;
 
-            if src_end > update.data.len() || dst_end > self.data.len() {
-                bail!("update rectangle falls outside the framebuffer bounds");
-            }
+        Self::blit_update_from_frame_data(
+            format,
+            source_stride,
+            rgba_stride,
+            rect,
+            mapped.mmap.as_ref(),
+            rgba,
+        )
+    }
 
-            self.data[dst_start..dst_end].copy_from_slice(&update.data[src_start..src_end]);
-        }
+    #[cfg(unix)]
+    fn refresh_full_mapped_frame(&mut self) -> Result<()> {
+        let rect = FrameRect {
+            x: 0,
+            y: 0,
+            width: usize::try_from(self.width).context("invalid framebuffer width")?,
+            height: usize::try_from(self.height).context("invalid framebuffer height")?,
+        };
+        let mapped = self
+            .mapped
+            .as_ref()
+            .context("received a shared-memory scanout without a mapping")?;
+        let format = self.format;
+        let source_stride = self.source_stride;
+        let rgba_stride = self.rgba_stride();
+        let rgba = &mut self.rgba;
 
-        Ok(())
+        Self::blit_update_from_frame_data(
+            format,
+            source_stride,
+            rgba_stride,
+            rect,
+            mapped.mmap.as_ref(),
+            rgba,
+        )
     }
 
     fn snapshot(&self) -> FrameSnapshot {
         FrameSnapshot {
             width: self.width,
             height: self.height,
-            stride: self.width as usize * RGBA_BYTES_PER_PIXEL,
-            data: self.format.to_rgba_bytes(
-                self.width as usize,
-                self.height as usize,
-                self.stride,
-                &self.data,
-            ),
+            stride: self.rgba_stride(),
+            data: self.rgba.clone(),
         }
+    }
+
+    fn rgba_stride(&self) -> usize {
+        usize::try_from(self.width).unwrap_or(0) * RGBA_BYTES_PER_PIXEL
+    }
+
+    fn validate_rect(&self, x: i32, y: i32, width: i32, height: i32) -> Result<FrameRect> {
+        let x = usize::try_from(x).context("negative update x coordinate")?;
+        let y = usize::try_from(y).context("negative update y coordinate")?;
+        let width = usize::try_from(width).context("negative update width")?;
+        let height = usize::try_from(height).context("negative update height")?;
+        let framebuffer_width = usize::try_from(self.width).context("invalid framebuffer width")?;
+        let framebuffer_height =
+            usize::try_from(self.height).context("invalid framebuffer height")?;
+
+        if x.checked_add(width).context("update width overflow")? > framebuffer_width
+            || y.checked_add(height).context("update height overflow")? > framebuffer_height
+        {
+            bail!("update rectangle falls outside the framebuffer bounds");
+        }
+
+        Ok(FrameRect {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
+    fn blit_frame_from_linear(&mut self, data: &[u8]) -> Result<()> {
+        let rect = FrameRect {
+            x: 0,
+            y: 0,
+            width: usize::try_from(self.width).context("invalid framebuffer width")?,
+            height: usize::try_from(self.height).context("invalid framebuffer height")?,
+        };
+        self.blit_update_from_linear(rect, self.source_stride, data)
+    }
+
+    fn blit_update_from_linear(
+        &mut self,
+        rect: FrameRect,
+        src_stride: usize,
+        data: &[u8],
+    ) -> Result<()> {
+        let row_len = rect
+            .width
+            .checked_mul(self.format.bytes_per_pixel())
+            .context("update row size overflow")?;
+
+        for row in 0..rect.height {
+            let src_start = row
+                .checked_mul(src_stride)
+                .context("update source offset overflow")?;
+            let src_end = src_start
+                .checked_add(row_len)
+                .context("update source range overflow")?;
+            if src_end > data.len() {
+                bail!("update payload is too short for the advertised rectangle");
+            }
+
+            let dst_start = rect
+                .y
+                .checked_add(row)
+                .context("update destination y overflow")?
+                .checked_mul(self.rgba_stride())
+                .context("update destination row overflow")?
+                .checked_add(
+                    rect.x
+                        .checked_mul(RGBA_BYTES_PER_PIXEL)
+                        .context("update destination x overflow")?,
+                )
+                .context("update destination offset overflow")?;
+            let dst_end = dst_start
+                .checked_add(
+                    rect.width
+                        .checked_mul(RGBA_BYTES_PER_PIXEL)
+                        .context("update destination width overflow")?,
+                )
+                .context("update destination range overflow")?;
+
+            self.format.write_rgba_row(
+                &data[src_start..src_end],
+                &mut self.rgba[dst_start..dst_end],
+            );
+        }
+
+        Ok(())
+    }
+
+    fn blit_update_from_frame_data(
+        format: PixelFormat,
+        source_stride: usize,
+        rgba_stride: usize,
+        rect: FrameRect,
+        data: &[u8],
+        rgba: &mut [u8],
+    ) -> Result<()> {
+        let row_len = rect
+            .width
+            .checked_mul(format.bytes_per_pixel())
+            .context("mapped update row size overflow")?;
+
+        for row in 0..rect.height {
+            let src_start = rect
+                .y
+                .checked_add(row)
+                .context("mapped update y overflow")?
+                .checked_mul(source_stride)
+                .context("mapped update row overflow")?
+                .checked_add(
+                    rect.x
+                        .checked_mul(format.bytes_per_pixel())
+                        .context("mapped update x overflow")?,
+                )
+                .context("mapped update source offset overflow")?;
+            let src_end = src_start
+                .checked_add(row_len)
+                .context("mapped update source range overflow")?;
+            if src_end > data.len() {
+                bail!("mapped update rectangle falls outside the shared framebuffer");
+            }
+
+            let dst_start = rect
+                .y
+                .checked_add(row)
+                .context("mapped update destination y overflow")?
+                .checked_mul(rgba_stride)
+                .context("mapped update destination row overflow")?
+                .checked_add(
+                    rect.x
+                        .checked_mul(RGBA_BYTES_PER_PIXEL)
+                        .context("mapped update destination x overflow")?,
+                )
+                .context("mapped update destination offset overflow")?;
+            let dst_end = dst_start
+                .checked_add(
+                    rect.width
+                        .checked_mul(RGBA_BYTES_PER_PIXEL)
+                        .context("mapped update destination width overflow")?,
+                )
+                .context("mapped update destination range overflow")?;
+
+            format.write_rgba_row(&data[src_start..src_end], &mut rgba[dst_start..dst_end]);
+        }
+
+        Ok(())
     }
 }
 
 struct FrameStreamHandler {
     event_tx: Sender<ViewerEvent>,
     framebuffer: Option<Framebuffer>,
-    dmabuf_reported: bool,
 }
 
 impl FrameStreamHandler {
@@ -458,7 +898,6 @@ impl FrameStreamHandler {
         Self {
             event_tx,
             framebuffer: None,
-            dmabuf_reported: false,
         }
     }
 
@@ -473,11 +912,8 @@ impl FrameStreamHandler {
                 .send(ViewerEvent::Frame(framebuffer.snapshot()));
         }
     }
-}
 
-#[async_trait]
-impl ConsoleListenerHandler for FrameStreamHandler {
-    async fn scanout(&mut self, scanout: Scanout) {
+    fn scanout(&mut self, scanout: Scanout) {
         match Framebuffer::from_scanout(scanout) {
             Ok(framebuffer) => {
                 self.framebuffer = Some(framebuffer);
@@ -487,7 +923,7 @@ impl ConsoleListenerHandler for FrameStreamHandler {
         }
     }
 
-    async fn update(&mut self, update: Update) {
+    fn update(&mut self, update: Update) {
         let Some(framebuffer) = &mut self.framebuffer else {
             return;
         };
@@ -501,35 +937,72 @@ impl ConsoleListenerHandler for FrameStreamHandler {
     }
 
     #[cfg(unix)]
-    async fn scanout_dmabuf(&mut self, _scanout: ScanoutDMABUF) {
-        if !self.dmabuf_reported {
-            self.dmabuf_reported = true;
-            self.send_status("DMABUF scanout is not supported by `qd2 connect` yet.");
+    fn scanout_map(&mut self, scanout: ScanoutMap) {
+        match Framebuffer::from_map(scanout) {
+            Ok(framebuffer) => {
+                self.framebuffer = Some(framebuffer);
+                self.send_current_frame();
+            }
+            Err(error) => {
+                self.send_status(format!("Could not map the shared framebuffer: {error:#}"))
+            }
         }
     }
 
     #[cfg(unix)]
-    async fn update_dmabuf(&mut self, _update: UpdateDMABUF) {
-        if !self.dmabuf_reported {
-            self.dmabuf_reported = true;
-            self.send_status("DMABUF updates are not supported by `qd2 connect` yet.");
+    fn update_map(&mut self, update: UpdateMap) {
+        let Some(framebuffer) = &mut self.framebuffer else {
+            return;
+        };
+
+        match framebuffer.refresh_mapped_region(update) {
+            Ok(()) => self.send_current_frame(),
+            Err(error) => self.send_status(format!(
+                "Failed to refresh the shared framebuffer update: {error:#}"
+            )),
         }
     }
 
-    async fn disable(&mut self) {
+    #[cfg(unix)]
+    fn scanout_dmabuf(&mut self, scanout: ScanoutDMABUF) {
+        self.framebuffer = None;
+
+        match DmabufFrame::try_from_scanout(scanout) {
+            Ok(scanout) => {
+                let _ = self.event_tx.send(ViewerEvent::Dmabuf(scanout));
+            }
+            Err(error) => self.send_status(format!("Unsupported DMABUF scanout: {error:#}")),
+        }
+    }
+
+    #[cfg(unix)]
+    fn update_dmabuf(&mut self, update: UpdateDMABUF) {
+        let _ = self.event_tx.send(ViewerEvent::DmabufUpdate(update));
+    }
+
+    fn disable(&mut self) {
         self.framebuffer = None;
         self.send_status("The guest display was disabled.");
     }
 
-    async fn mouse_set(&mut self, _set: MouseSet) {}
+    fn mouse_set(&mut self, _set: MouseSet) {}
 
-    async fn cursor_define(&mut self, _cursor: Cursor) {}
+    fn cursor_define(&mut self, _cursor: Cursor) {}
 
     fn disconnected(&mut self) {
         let _ = self.event_tx.send(ViewerEvent::Disconnected);
     }
 
     fn interfaces(&self) -> Vec<String> {
+        #[cfg(unix)]
+        {
+            return vec![
+                "org.qemu.Display1.Listener.Unix.Map".to_owned(),
+                "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2".to_owned(),
+            ];
+        }
+
+        #[cfg(not(unix))]
         Vec::new()
     }
 }
@@ -564,24 +1037,13 @@ impl PixelFormat {
         }
     }
 
-    fn to_rgba_bytes(self, width: usize, height: usize, stride: usize, data: &[u8]) -> Vec<u8> {
-        let mut rgba = vec![0; width * height * RGBA_BYTES_PER_PIXEL];
-
-        for y in 0..height {
-            let src_row_start = y * stride;
-            let dst_row_start = y * width * RGBA_BYTES_PER_PIXEL;
-            let src_row = &data[src_row_start..src_row_start + width * self.bytes_per_pixel()];
-            let dst_row = &mut rgba[dst_row_start..dst_row_start + width * RGBA_BYTES_PER_PIXEL];
-
-            for (src, dst) in src_row
-                .chunks_exact(self.bytes_per_pixel())
-                .zip(dst_row.chunks_exact_mut(RGBA_BYTES_PER_PIXEL))
-            {
-                dst.copy_from_slice(&self.pixel_to_rgba(src));
-            }
+    fn write_rgba_row(self, src_row: &[u8], dst_row: &mut [u8]) {
+        for (src, dst) in src_row
+            .chunks_exact(self.bytes_per_pixel())
+            .zip(dst_row.chunks_exact_mut(RGBA_BYTES_PER_PIXEL))
+        {
+            dst.copy_from_slice(&self.pixel_to_rgba(src));
         }
-
-        rgba
     }
 
     fn pixel_to_rgba(self, src: &[u8]) -> [u8; RGBA_BYTES_PER_PIXEL] {
@@ -725,10 +1187,10 @@ impl RemoteConsole {
         }
     }
 
-    async fn register_listener<H: ConsoleListenerHandler>(&mut self, handler: H) -> Result<()> {
+    async fn register_listener(&mut self, event_tx: Sender<ViewerEvent>) -> Result<()> {
         #[cfg(not(unix))]
         {
-            let _ = handler;
+            let _ = event_tx;
             bail!("`qd2 connect` currently requires a Unix platform");
         }
 
@@ -739,6 +1201,7 @@ impl RemoteConsole {
             let (socket0, socket1) =
                 UnixStream::pair().context("failed to allocate the listener socket pair")?;
             let listener_fd: Fd<'_> = (&socket0).into();
+            let shared = Arc::new(SharedListenerState::new(event_tx));
 
             self.proxy
                 .register_listener(listener_fd)
@@ -747,10 +1210,21 @@ impl RemoteConsole {
 
             let listener_connection = zbus::connection::Builder::unix_stream(socket1)
                 .p2p()
-                .serve_at(LISTENER_PATH, LocalConsoleListener::new(handler))?
+                .serve_at(LISTENER_PATH, LocalConsoleListener::new(shared.clone()))?
                 .build()
                 .await
                 .context("failed to publish the local QEMU display listener")?;
+
+            listener_connection
+                .object_server()
+                .at(LISTENER_PATH, LocalConsoleListenerMap::new(shared.clone()))
+                .await
+                .context("failed to publish the shared-memory listener interface")?;
+            listener_connection
+                .object_server()
+                .at(LISTENER_PATH, LocalConsoleListenerDmabuf2::new(shared))
+                .await
+                .context("failed to publish the DMABUF2 listener interface")?;
 
             self.listener_connection = Some(listener_connection);
             Ok(())
@@ -758,25 +1232,54 @@ impl RemoteConsole {
     }
 }
 
-#[derive(Debug)]
-struct LocalConsoleListener<H: ConsoleListenerHandler> {
-    handler: H,
+struct SharedListenerState {
+    handler: Mutex<FrameStreamHandler>,
+    disconnected: AtomicBool,
 }
 
-impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
-    fn new(handler: H) -> Self {
-        Self { handler }
+impl SharedListenerState {
+    fn new(event_tx: Sender<ViewerEvent>) -> Self {
+        Self {
+            handler: Mutex::new(FrameStreamHandler::new(event_tx)),
+            disconnected: AtomicBool::new(false),
+        }
+    }
+
+    fn with_handler<T>(&self, f: impl FnOnce(&mut FrameStreamHandler) -> T) -> T {
+        let mut handler = self.handler.lock().expect("listener mutex was poisoned");
+        f(&mut handler)
+    }
+
+    fn disconnected(&self) {
+        if !self.disconnected.swap(true, Ordering::SeqCst) {
+            self.with_handler(|handler| handler.disconnected());
+        }
+    }
+
+    fn interfaces(&self) -> Vec<String> {
+        self.with_handler(|handler| handler.interfaces())
     }
 }
 
-impl<H: ConsoleListenerHandler> Drop for LocalConsoleListener<H> {
+#[derive(Clone)]
+struct LocalConsoleListener {
+    shared: Arc<SharedListenerState>,
+}
+
+impl LocalConsoleListener {
+    fn new(shared: Arc<SharedListenerState>) -> Self {
+        Self { shared }
+    }
+}
+
+impl Drop for LocalConsoleListener {
     fn drop(&mut self) {
-        self.handler.disconnected();
+        self.shared.disconnected();
     }
 }
 
 #[zbus::interface(name = "org.qemu.Display1.Listener", spawn = false)]
-impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
+impl LocalConsoleListener {
     async fn scanout(
         &mut self,
         width: u32,
@@ -785,15 +1288,15 @@ impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
         format: u32,
         data: serde_bytes::ByteBuf,
     ) {
-        self.handler
-            .scanout(Scanout {
+        self.shared.with_handler(|handler| {
+            handler.scanout(Scanout {
                 width,
                 height,
                 stride,
                 format,
                 data: data.into_vec(),
-            })
-            .await;
+            });
+        });
     }
 
     async fn update(
@@ -806,8 +1309,8 @@ impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
         format: u32,
         data: serde_bytes::ByteBuf,
     ) {
-        self.handler
-            .update(Update {
+        self.shared.with_handler(|handler| {
+            handler.update(Update {
                 x,
                 y,
                 w,
@@ -815,41 +1318,61 @@ impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
                 stride,
                 format,
                 data: data.into_vec(),
-            })
-            .await;
+            });
+        });
     }
 
     #[cfg(unix)]
     #[zbus(name = "ScanoutDMABUF")]
     async fn scanout_dmabuf(
         &mut self,
-        _fd: Fd<'_>,
-        _width: u32,
-        _height: u32,
-        _stride: u32,
-        _fourcc: u32,
-        _modifier: u64,
-        _y0_top: bool,
+        fd: Fd<'_>,
+        width: u32,
+        height: u32,
+        stride: u32,
+        fourcc: u32,
+        modifier: u64,
+        y0_top: bool,
     ) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported(
-            "DMABUF scanout is not supported by `qd2 connect` yet".into(),
-        ))
+        let fd = fd
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+
+        self.shared.with_handler(|handler| {
+            handler.scanout_dmabuf(ScanoutDMABUF {
+                fd: [fd.into_raw_fd(), -1, -1, -1],
+                width,
+                height,
+                offset: [0; 4],
+                stride: [stride, 0, 0, 0],
+                fourcc,
+                modifier,
+                y0_top,
+                num_planes: 1,
+            });
+        });
+
+        Ok(())
     }
 
     #[cfg(unix)]
     #[zbus(name = "UpdateDMABUF")]
-    async fn update_dmabuf(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported(
-            "DMABUF updates are not supported by `qd2 connect` yet".into(),
-        ))
+    async fn update_dmabuf(&mut self, x: i32, y: i32, w: i32, h: i32) -> zbus::fdo::Result<()> {
+        self.shared.with_handler(|handler| {
+            handler.update_dmabuf(UpdateDMABUF { x, y, w, h });
+        });
+
+        Ok(())
     }
 
     async fn disable(&mut self) {
-        self.handler.disable().await;
+        self.shared.with_handler(|handler| handler.disable());
     }
 
     async fn mouse_set(&mut self, x: i32, y: i32, on: i32) {
-        self.handler.mouse_set(MouseSet { x, y, on }).await;
+        self.shared
+            .with_handler(|handler| handler.mouse_set(MouseSet { x, y, on }));
     }
 
     async fn cursor_define(
@@ -860,20 +1383,155 @@ impl<H: ConsoleListenerHandler> LocalConsoleListener<H> {
         hot_y: i32,
         data: Vec<u8>,
     ) {
-        self.handler
-            .cursor_define(Cursor {
+        self.shared.with_handler(|handler| {
+            handler.cursor_define(Cursor {
                 width,
                 height,
                 hot_x,
                 hot_y,
                 data,
-            })
-            .await;
+            });
+        });
     }
 
     #[zbus(property)]
     fn interfaces(&self) -> Vec<String> {
-        self.handler.interfaces()
+        self.shared.interfaces()
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct LocalConsoleListenerMap {
+    shared: Arc<SharedListenerState>,
+}
+
+#[cfg(unix)]
+impl LocalConsoleListenerMap {
+    fn new(shared: Arc<SharedListenerState>) -> Self {
+        Self { shared }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LocalConsoleListenerMap {
+    fn drop(&mut self) {
+        self.shared.disconnected();
+    }
+}
+
+#[cfg(unix)]
+#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.Map", spawn = false)]
+impl LocalConsoleListenerMap {
+    async fn scanout_map(
+        &mut self,
+        fd: Fd<'_>,
+        offset: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: u32,
+    ) -> zbus::fdo::Result<()> {
+        let fd = fd
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+
+        self.shared.with_handler(|handler| {
+            handler.scanout_map(ScanoutMap {
+                fd,
+                offset,
+                width,
+                height,
+                stride,
+                format,
+            });
+        });
+
+        Ok(())
+    }
+
+    async fn update_map(&mut self, x: i32, y: i32, w: i32, h: i32) -> zbus::fdo::Result<()> {
+        self.shared
+            .with_handler(|handler| handler.update_map(UpdateMap { x, y, w, h }));
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct LocalConsoleListenerDmabuf2 {
+    shared: Arc<SharedListenerState>,
+}
+
+#[cfg(unix)]
+impl LocalConsoleListenerDmabuf2 {
+    fn new(shared: Arc<SharedListenerState>) -> Self {
+        Self { shared }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LocalConsoleListenerDmabuf2 {
+    fn drop(&mut self) {
+        self.shared.disconnected();
+    }
+}
+
+#[cfg(unix)]
+#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2", spawn = false)]
+impl LocalConsoleListenerDmabuf2 {
+    #[zbus(name = "ScanoutDMABUF2")]
+    async fn scanout_dmabuf(
+        &mut self,
+        fd: Vec<Fd<'_>>,
+        _x: u32,
+        _y: u32,
+        width: u32,
+        height: u32,
+        offset: Vec<u32>,
+        stride: Vec<u32>,
+        num_planes: u32,
+        fourcc: u32,
+        _backing_width: u32,
+        _backing_height: u32,
+        modifier: u64,
+        y0_top: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut fds = [-1; 4];
+        for (index, fd) in fd.into_iter().take(4).enumerate() {
+            let owned = fd
+                .as_fd()
+                .try_clone_to_owned()
+                .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+            fds[index] = owned.into_raw_fd();
+        }
+
+        let mut offsets = [0; 4];
+        for (index, value) in offset.into_iter().take(4).enumerate() {
+            offsets[index] = value;
+        }
+
+        let mut strides = [0; 4];
+        for (index, value) in stride.into_iter().take(4).enumerate() {
+            strides[index] = value;
+        }
+
+        self.shared.with_handler(|handler| {
+            handler.scanout_dmabuf(ScanoutDMABUF {
+                fd: fds,
+                width,
+                height,
+                offset: offsets,
+                stride: strides,
+                fourcc,
+                modifier,
+                y0_top,
+                num_planes,
+            });
+        });
+
+        Ok(())
     }
 }
 
