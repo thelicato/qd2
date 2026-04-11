@@ -13,10 +13,12 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::List(args) => {
             let discovery = qemu::discover(args.address.as_deref()).await?;
+            print_warnings(&discovery.warnings);
             print_vm_list(&discovery);
         }
         Command::Inspect(args) => {
             let report = qemu::inspect(args.address(), args.vm.as_deref()).await?;
+            print_warnings(&report.warnings);
             print_inspection(&report);
         }
     }
@@ -41,6 +43,7 @@ fn print_vm_list(discovery: &qemu::Discovery) {
         println!("{}", vm.name);
         println!("  UUID: {}", vm.uuid);
         println!("  D-Bus owner: {}", vm.owner);
+        println!("  Source: {}", vm.source_label);
         println!("  Consoles: {}", vm.console_ids.len());
 
         if vm.interfaces.is_empty() {
@@ -56,6 +59,9 @@ fn print_inspection(report: &qemu::InspectionReport) {
     println!("  UUID: {}", report.vm.uuid);
     println!("  D-Bus owner: {}", report.vm.owner);
     println!("  Bus: {}", report.bus_label);
+    if let Some(address) = &report.vm.source_address {
+        println!("  Address: {}", address);
+    }
 
     if report.vm.interfaces.is_empty() {
         println!("  VM interfaces: none reported");
@@ -107,4 +113,10 @@ fn print_inspection(report: &qemu::InspectionReport) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn print_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("Warning: {warning}");
+    }
 }
