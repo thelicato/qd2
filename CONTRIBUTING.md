@@ -17,11 +17,12 @@ QD2 currently builds from source with:
 - Rust stable with Cargo
 - GTK4 development files
 - pixman development files
+- libusbredirparser development files
 - `pkg-config` or `pkgconf`
 
 Typical package names:
 
-- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `pkg-config`
+- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `libusbredirparser-dev`, `pkg-config`
 
 Useful commands:
 

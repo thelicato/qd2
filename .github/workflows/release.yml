@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -37,7 +37,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libpixman-1-dev pkg-config dpkg-dev desktop-file-utils
+          sudo apt-get install -y libgtk-4-dev libpixman-1-dev libusbredirparser-dev pkg-config dpkg-dev desktop-file-utils
 
       - name: Validate desktop launcher
         if: runner.os == 'Linux'
@@ -85,7 +85,7 @@ jobs:
           cargo generate-rpm --target "${{ matrix.target }}" -o "dist/${BINARY_NAME}-${version}-${{ matrix.asset_suffix }}.rpm"
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -100,17 +100,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: lts/*
+          node-version: 24
 
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: dist
