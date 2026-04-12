@@ -3,6 +3,8 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 
+use super::hotkeys::ViewerHotkeys;
+
 const FULLSCREEN_HOVER_HIDE_DELAY: Duration = Duration::from_millis(900);
 const VIEWER_CSS: &str = r#"
 .viewer-floating-controls {
@@ -51,8 +53,10 @@ pub(super) fn install_viewer_css(display: &gdk::Display) {
 pub(super) fn build_viewer_controls(
     window: &gtk::Window,
     app_icon: Option<&gdk::Texture>,
+    hotkeys: ViewerHotkeys,
 ) -> (gtk::Box, gtk::Button) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let hotkeys = Rc::new(hotkeys);
 
     let fullscreen_button = gtk::Button::from_icon_name("view-fullscreen-symbolic");
     fullscreen_button.add_css_class("flat");
@@ -75,9 +79,10 @@ pub(super) fn build_viewer_controls(
     shortcuts_button.connect_clicked({
         let popover = popover.clone();
         let window = window.clone();
+        let hotkeys = hotkeys.clone();
         move |_| {
             popover.popdown();
-            show_keyboard_shortcuts(&window);
+            show_keyboard_shortcuts(&window, hotkeys.as_ref());
         }
     });
     popover_box.append(&shortcuts_button);
@@ -111,7 +116,7 @@ pub(super) fn build_viewer_controls(
     (controls, fullscreen_button)
 }
 
-fn show_keyboard_shortcuts(window: &gtk::Window) {
+fn show_keyboard_shortcuts(window: &gtk::Window, hotkeys: &ViewerHotkeys) {
     let shortcuts = gtk::ShortcutsWindow::builder()
         .title("Keyboard Shortcuts")
         .modal(true)
@@ -124,17 +129,10 @@ fn show_keyboard_shortcuts(window: &gtk::Window) {
         .build();
     let group = gtk::ShortcutsGroup::builder().title("Display").build();
 
-    for (title, accelerator) in [
-        ("Release keyboard and mouse", "<Control><Alt>"),
-        ("Toggle fullscreen", "F11"),
-        ("Leave fullscreen", "Escape"),
-        ("Rotate DMABUF view", "<Control><Alt>r"),
-        ("Toggle DMABUF vertical flip", "<Control><Alt>f"),
-        ("Reset DMABUF transform", "<Control><Alt>0"),
-    ] {
+    for (title, accelerator) in hotkeys.shortcuts_for_dialog() {
         let shortcut = gtk::ShortcutsShortcut::builder()
             .title(title)
-            .accelerator(accelerator)
+            .accelerator(&accelerator)
             .build();
         group.add_shortcut(&shortcut);
     }

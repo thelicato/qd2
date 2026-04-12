@@ -1,10 +1,10 @@
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
-use gtk::{gdk, glib, prelude::*};
+use gtk::{glib, prelude::*};
 use gtk4 as gtk;
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{InputEvent, grab};
+use super::{InputEvent, grab, hotkeys::Hotkey};
 
 #[derive(Clone)]
 pub(super) struct KeyboardControllerHandle {
@@ -22,6 +22,7 @@ pub(super) fn install_keyboard_controller(
     picture: &gtk::Picture,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
     input_grab: grab::SharedInputGrab,
+    release_hotkey: Hotkey,
     release_grab: impl Fn() + 'static,
 ) -> KeyboardControllerHandle {
     let state = Rc::new(RefCell::new(PressedKeyState::default()));
@@ -31,6 +32,7 @@ pub(super) fn install_keyboard_controller(
     key_controller.connect_key_pressed({
         let input_tx = input_tx.clone();
         let input_grab = input_grab.clone();
+        let release_hotkey = release_hotkey.clone();
         let state = state.clone();
         move |_, keyval, keycode, modifiers| {
             let Some(qnum) = gdk_keycode_to_qnum(keycode) else {
@@ -41,7 +43,7 @@ pub(super) fn install_keyboard_controller(
                 return glib::Propagation::Proceed;
             }
 
-            if is_grab_release_sequence(keyval, modifiers) {
+            if release_hotkey.matches(keyval, modifiers) {
                 let mut state = state.borrow_mut();
                 state.release_all(&input_tx);
                 state.suppress_next_release(qnum);
@@ -108,14 +110,6 @@ impl PressedKeyState {
             self.suppressed_releases.insert(qnum);
         }
     }
-}
-
-fn is_grab_release_sequence(keyval: gdk::Key, modifiers: gdk::ModifierType) -> bool {
-    let control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
-    let alt = modifiers.contains(gdk::ModifierType::ALT_MASK);
-
-    matches!(keyval, gdk::Key::Control_L | gdk::Key::Control_R) && alt
-        || matches!(keyval, gdk::Key::Alt_L | gdk::Key::Alt_R) && control
 }
 
 pub(super) fn gdk_keycode_to_qnum(keycode: u32) -> Option<u32> {
@@ -280,10 +274,12 @@ pub(super) fn linux_keycode_to_qnum(linux_keycode: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PressedKeyState, is_grab_release_sequence, linux_keycode_to_qnum};
     use gtk::gdk;
     use gtk4 as gtk;
     use tokio::sync::mpsc as tokio_mpsc;
+
+    use super::{PressedKeyState, linux_keycode_to_qnum};
+    use crate::viewer::hotkeys::ViewerHotkeys;
 
     #[test]
     fn extended_linux_keycodes_are_translated_to_qnum() {
@@ -293,19 +289,24 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_alt_is_reserved_for_releasing_the_grab() {
-        assert!(is_grab_release_sequence(
-            gdk::Key::Alt_L,
-            gdk::ModifierType::CONTROL_MASK
-        ));
-        assert!(is_grab_release_sequence(
-            gdk::Key::Control_L,
-            gdk::ModifierType::ALT_MASK
-        ));
-        assert!(!is_grab_release_sequence(
-            gdk::Key::Control_L,
-            gdk::ModifierType::empty()
-        ));
+    fn default_release_hotkey_matches_ctrl_alt() {
+        let hotkeys = ViewerHotkeys::default();
+
+        assert!(
+            hotkeys
+                .release_cursor()
+                .matches(gdk::Key::Alt_L, gdk::ModifierType::CONTROL_MASK)
+        );
+        assert!(
+            hotkeys
+                .release_cursor()
+                .matches(gdk::Key::Control_L, gdk::ModifierType::ALT_MASK)
+        );
+        assert!(
+            !hotkeys
+                .release_cursor()
+                .matches(gdk::Key::Control_L, gdk::ModifierType::empty())
+        );
     }
 
     #[test]

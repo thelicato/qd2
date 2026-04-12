@@ -4,6 +4,7 @@ mod cursor;
 mod dmabuf;
 mod framebuffer;
 mod grab;
+mod hotkeys;
 mod keyboard;
 mod listener;
 mod mouse;
@@ -30,7 +31,9 @@ use crate::qemu::ConnectTarget;
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Start the GTK viewer and the background listener that mirrors the QEMU display stream.
-pub fn connect(target: ConnectTarget) -> Result<()> {
+pub fn connect(target: ConnectTarget, hotkeys_spec: Option<&str>) -> Result<()> {
+    let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
+        .context("failed to parse `--hotkeys` overrides")?;
     let (event_tx, event_rx) = std_mpsc::channel();
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
     let (input_tx, input_rx) = tokio_mpsc::unbounded_channel();
@@ -48,7 +51,7 @@ pub fn connect(target: ConnectTarget) -> Result<()> {
         .recv()
         .context("display listener thread ended before it reported startup state")??;
 
-    let ui_result = run_window(&target, &ready, event_rx, input_tx);
+    let ui_result = run_window(&target, &ready, event_rx, input_tx, hotkeys);
 
     let _ = shutdown_tx.send(());
     join_handle
@@ -65,6 +68,7 @@ fn run_window(
     ready: &ViewerReady,
     event_rx: Receiver<ViewerEvent>,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
+    hotkeys: hotkeys::ViewerHotkeys,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -115,8 +119,10 @@ fn run_window(
     let title_label = gtk::Label::new(Some(&ready.title));
     title_label.add_css_class("viewer-title");
 
+    let hotkeys = Rc::new(hotkeys);
+
     let (titlebar_controls, titlebar_fullscreen_button) =
-        chrome::build_viewer_controls(&window, app_icon.as_ref());
+        chrome::build_viewer_controls(&window, app_icon.as_ref(), hotkeys.as_ref().clone());
     let header_bar = gtk::HeaderBar::new();
     header_bar.set_show_title_buttons(true);
     header_bar.set_title_widget(Some(&title_label));
@@ -124,7 +130,7 @@ fn run_window(
     window.set_titlebar(Some(&header_bar));
 
     let (floating_controls, overlay_fullscreen_button) =
-        chrome::build_viewer_controls(&window, app_icon.as_ref());
+        chrome::build_viewer_controls(&window, app_icon.as_ref(), hotkeys.as_ref().clone());
     floating_controls.add_css_class("viewer-floating-controls");
 
     let fullscreen_revealer = gtk::Revealer::builder()
@@ -224,16 +230,19 @@ fn run_window(
     viewer_shortcuts.set_propagation_phase(gtk::PropagationPhase::Capture);
     viewer_shortcuts.connect_key_pressed({
         let window = window.clone();
-        move |_, keyval, _, _| match keyval {
-            gdk::Key::F11 => {
+        let hotkeys = hotkeys.clone();
+        move |_, keyval, _, modifiers| {
+            if hotkeys.toggle_fullscreen().matches(keyval, modifiers) {
                 chrome::toggle_fullscreen(&window);
-                glib::Propagation::Stop
+                return glib::Propagation::Stop;
             }
-            gdk::Key::Escape if window.is_fullscreen() => {
+
+            if window.is_fullscreen() && hotkeys.leave_fullscreen().matches(keyval, modifiers) {
                 window.unfullscreen();
-                glib::Propagation::Stop
+                return glib::Propagation::Stop;
             }
-            _ => glib::Propagation::Proceed,
+
+            glib::Propagation::Proceed
         }
     });
     picture.add_controller(viewer_shortcuts);
@@ -244,20 +253,31 @@ fn run_window(
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
     let input_grab = grab::new_state();
     let keyboard_controller = ready.keyboard_available.then(|| {
-        keyboard::install_keyboard_controller(&picture, input_tx.clone(), input_grab.clone(), {
-            let window = window.clone();
-            let picture = picture.clone();
-            let ui_state = ui_state.clone();
-            let cursor_state = cursor_state.clone();
-            let mouse_mode = mouse_mode.clone();
-            let input_grab = input_grab.clone();
-            move || {
-                if grab::release(&window, &input_grab) {
-                    ui_state.borrow_mut().last_pointer_guest_position = None;
-                    grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+        keyboard::install_keyboard_controller(
+            &picture,
+            input_tx.clone(),
+            input_grab.clone(),
+            hotkeys.release_cursor().clone(),
+            {
+                let window = window.clone();
+                let picture = picture.clone();
+                let ui_state = ui_state.clone();
+                let cursor_state = cursor_state.clone();
+                let mouse_mode = mouse_mode.clone();
+                let input_grab = input_grab.clone();
+                move || {
+                    if grab::release(&window, &input_grab) {
+                        ui_state.borrow_mut().last_pointer_guest_position = None;
+                        grab::sync_cursor_capture(
+                            &picture,
+                            &cursor_state,
+                            &input_grab,
+                            &mouse_mode,
+                        );
+                    }
                 }
-            }
-        })
+            },
+        )
     });
     if ready.clipboard_available {
         clipboard::install_host_clipboard_bridge(
@@ -326,25 +346,23 @@ fn run_window(
         shortcuts.connect_key_pressed({
             let current_dmabuf = current_dmabuf.clone();
             let dmabuf_transform = dmabuf_transform.clone();
+            let hotkeys = hotkeys.clone();
             let picture = picture.clone();
             let status_label = status_label.clone();
             let ui_state = ui_state.clone();
             let window = window.clone();
             let window_base_title = window_base_title.clone();
             move |_, keyval, _, state| {
-                let ctrl_alt = state.contains(gdk::ModifierType::CONTROL_MASK)
-                    && state.contains(gdk::ModifierType::ALT_MASK);
-                if !ctrl_alt {
-                    return glib::Propagation::Proceed;
-                }
-
                 {
                     let mut transform = dmabuf_transform.borrow_mut();
-                    match keyval {
-                        gdk::Key::R | gdk::Key::r => transform.rotate_clockwise(),
-                        gdk::Key::F | gdk::Key::f => transform.toggle_vertical_flip(),
-                        gdk::Key::_0 => transform.reset(),
-                        _ => return glib::Propagation::Proceed,
+                    if hotkeys.rotate_dmabuf_view().matches(keyval, state) {
+                        transform.rotate_clockwise();
+                    } else if hotkeys.toggle_dmabuf_flip().matches(keyval, state) {
+                        transform.toggle_vertical_flip();
+                    } else if hotkeys.reset_dmabuf_transform().matches(keyval, state) {
+                        transform.reset();
+                    } else {
+                        return glib::Propagation::Proceed;
                     }
 
                     if let Some(presentation) = current_dmabuf.borrow().as_ref() {

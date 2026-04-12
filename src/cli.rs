@@ -56,6 +56,11 @@ pub struct ConnectArgs {
     /// Console ID to open. Defaults to the first reported console.
     #[arg(long, short = 'c', value_name = "CONSOLE_ID")]
     pub console: Option<u32>,
+
+    /// Override viewer hotkeys, for example:
+    /// `toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt`
+    #[arg(long, value_name = "ACTION=ACCEL[,ACTION=ACCEL...]")]
+    pub hotkeys: Option<String>,
 }
 
 impl ConnectArgs {
