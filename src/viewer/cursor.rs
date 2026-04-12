@@ -74,6 +74,7 @@ impl GuestCursor {
 
 pub(super) struct CursorState {
     visible: bool,
+    capture_hidden: bool,
     active_cursor: Option<gdk::Cursor>,
     hidden_cursor: Option<gdk::Cursor>,
 }
@@ -82,6 +83,7 @@ impl Default for CursorState {
     fn default() -> Self {
         Self {
             visible: true,
+            capture_hidden: false,
             active_cursor: None,
             hidden_cursor: None,
         }
@@ -97,8 +99,12 @@ impl CursorState {
         self.visible = visible;
     }
 
+    pub(super) fn set_capture_hidden(&mut self, capture_hidden: bool) {
+        self.capture_hidden = capture_hidden;
+    }
+
     pub(super) fn apply_to_widget(&mut self, widget: &impl IsA<gtk::Widget>) {
-        if !self.visible {
+        if !self.visible || self.capture_hidden {
             let hidden = self.hidden_cursor();
             widget.set_cursor(Some(&hidden));
             return;

@@ -125,6 +125,7 @@ fn show_keyboard_shortcuts(window: &gtk::Window) {
     let group = gtk::ShortcutsGroup::builder().title("Display").build();
 
     for (title, accelerator) in [
+        ("Release keyboard and mouse", "<Control><Alt>"),
         ("Toggle fullscreen", "F11"),
         ("Leave fullscreen", "Escape"),
         ("Rotate DMABUF view", "<Control><Alt>r"),

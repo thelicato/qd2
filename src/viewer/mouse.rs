@@ -1,11 +1,11 @@
 use std::{cell::RefCell, rc::Rc};
 
-use gtk::{glib, prelude::*};
+use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 use qemu_display::MouseButton;
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{InputEvent, UiState};
+use super::{InputEvent, UiState, grab};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) enum MouseMode {
@@ -29,6 +29,8 @@ pub(super) fn install_mouse_controllers(
     ui_state: Rc<RefCell<UiState>>,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
     mouse_mode: Rc<RefCell<MouseMode>>,
+    input_grab: grab::SharedInputGrab,
+    activate_grab: impl Fn(Option<gdk::Event>) + 'static,
 ) {
     if *mouse_mode.borrow() == MouseMode::Disabled {
         return;
@@ -41,8 +43,11 @@ pub(super) fn install_mouse_controllers(
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
         let mouse_mode = mouse_mode.clone();
+        let input_grab = input_grab.clone();
         move |gesture, _, x, y| {
-            picture.grab_focus();
+            if !grab::is_active(&input_grab) {
+                activate_grab(gesture.current_event());
+            }
             sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
 
             if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
@@ -55,7 +60,11 @@ pub(super) fn install_mouse_controllers(
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
         let mouse_mode = mouse_mode.clone();
+        let input_grab = input_grab.clone();
         move |gesture, _, x, y| {
+            if !grab::is_active(&input_grab) {
+                return;
+            }
             sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
 
             if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
@@ -71,14 +80,26 @@ pub(super) fn install_mouse_controllers(
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
         let mouse_mode = mouse_mode.clone();
-        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
+        let input_grab = input_grab.clone();
+        move |_, x, y| {
+            if !grab::is_active(&input_grab) {
+                return;
+            }
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
+        }
     });
     motion.connect_motion({
         let picture = picture.clone();
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
         let mouse_mode = mouse_mode.clone();
-        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
+        let input_grab = input_grab.clone();
+        move |_, x, y| {
+            if !grab::is_active(&input_grab) {
+                return;
+            }
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
+        }
     });
     motion.connect_leave({
         let ui_state = ui_state.clone();
@@ -93,7 +114,11 @@ pub(super) fn install_mouse_controllers(
     );
     scroll.connect_scroll({
         let input_tx = input_tx.clone();
+        let input_grab = input_grab.clone();
         move |_, dx, dy| {
+            if !grab::is_active(&input_grab) {
+                return glib::Propagation::Proceed;
+            }
             let handled = emit_scroll_buttons(&input_tx, dx, dy);
             if handled {
                 glib::Propagation::Stop

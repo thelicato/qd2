@@ -1,33 +1,121 @@
-use gtk::{glib, prelude::*};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
+
+use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::InputEvent;
+use super::{InputEvent, grab};
+
+#[derive(Clone)]
+pub(super) struct KeyboardControllerHandle {
+    state: Rc<RefCell<PressedKeyState>>,
+    input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
+}
+
+impl KeyboardControllerHandle {
+    pub(super) fn force_release(&self) {
+        self.state.borrow_mut().release_all(&self.input_tx);
+    }
+}
 
 pub(super) fn install_keyboard_controller(
     picture: &gtk::Picture,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
-) {
+    input_grab: grab::SharedInputGrab,
+    release_grab: impl Fn() + 'static,
+) -> KeyboardControllerHandle {
+    let state = Rc::new(RefCell::new(PressedKeyState::default()));
+
     let key_controller = gtk::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     key_controller.connect_key_pressed({
         let input_tx = input_tx.clone();
-        move |_, _, keycode, _| match gdk_keycode_to_qnum(keycode) {
-            Some(qnum) => {
-                let _ = input_tx.send(InputEvent::KeyPress(qnum));
-                glib::Propagation::Stop
+        let input_grab = input_grab.clone();
+        let state = state.clone();
+        move |_, keyval, keycode, modifiers| {
+            let Some(qnum) = gdk_keycode_to_qnum(keycode) else {
+                return glib::Propagation::Proceed;
+            };
+
+            if !grab::is_active(&input_grab) {
+                return glib::Propagation::Proceed;
             }
-            None => glib::Propagation::Proceed,
+
+            if is_grab_release_sequence(keyval, modifiers) {
+                let mut state = state.borrow_mut();
+                state.release_all(&input_tx);
+                state.suppress_next_release(qnum);
+                release_grab();
+                return glib::Propagation::Stop;
+            }
+
+            let mut state = state.borrow_mut();
+            if state.press(qnum) {
+                let _ = input_tx.send(InputEvent::KeyPress(qnum));
+            }
+            glib::Propagation::Stop
         }
     });
     key_controller.connect_key_released({
         let input_tx = input_tx.clone();
+        let state = state.clone();
         move |_, _, keycode, _| {
-            if let Some(qnum) = gdk_keycode_to_qnum(keycode) {
+            let Some(qnum) = gdk_keycode_to_qnum(keycode) else {
+                return;
+            };
+
+            let mut state = state.borrow_mut();
+            if state.take_suppressed_release(qnum) {
+                return;
+            }
+
+            if state.release(qnum) {
                 let _ = input_tx.send(InputEvent::KeyRelease(qnum));
             }
         }
     });
     picture.add_controller(key_controller);
+
+    KeyboardControllerHandle { state, input_tx }
+}
+
+#[derive(Default)]
+struct PressedKeyState {
+    pressed: HashSet<u32>,
+    suppressed_releases: HashSet<u32>,
+}
+
+impl PressedKeyState {
+    fn press(&mut self, qnum: u32) -> bool {
+        self.pressed.insert(qnum)
+    }
+
+    fn release(&mut self, qnum: u32) -> bool {
+        self.pressed.remove(&qnum)
+    }
+
+    fn suppress_next_release(&mut self, qnum: u32) {
+        self.suppressed_releases.insert(qnum);
+    }
+
+    fn take_suppressed_release(&mut self, qnum: u32) -> bool {
+        self.suppressed_releases.remove(&qnum)
+    }
+
+    fn release_all(&mut self, input_tx: &tokio_mpsc::UnboundedSender<InputEvent>) {
+        for qnum in self.pressed.drain() {
+            let _ = input_tx.send(InputEvent::KeyRelease(qnum));
+            self.suppressed_releases.insert(qnum);
+        }
+    }
+}
+
+fn is_grab_release_sequence(keyval: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    let control = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
+    let alt = modifiers.contains(gdk::ModifierType::ALT_MASK);
+
+    matches!(keyval, gdk::Key::Control_L | gdk::Key::Control_R) && alt
+        || matches!(keyval, gdk::Key::Alt_L | gdk::Key::Alt_R) && control
 }
 
 pub(super) fn gdk_keycode_to_qnum(keycode: u32) -> Option<u32> {
@@ -188,4 +276,58 @@ pub(super) fn linux_keycode_to_qnum(linux_keycode: u32) -> Option<u32> {
     };
 
     Some(qnum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PressedKeyState, is_grab_release_sequence, linux_keycode_to_qnum};
+    use gtk::gdk;
+    use gtk4 as gtk;
+    use tokio::sync::mpsc as tokio_mpsc;
+
+    #[test]
+    fn extended_linux_keycodes_are_translated_to_qnum() {
+        assert_eq!(linux_keycode_to_qnum(97), Some(157));
+        assert_eq!(linux_keycode_to_qnum(100), Some(184));
+        assert_eq!(linux_keycode_to_qnum(125), Some(219));
+    }
+
+    #[test]
+    fn ctrl_alt_is_reserved_for_releasing_the_grab() {
+        assert!(is_grab_release_sequence(
+            gdk::Key::Alt_L,
+            gdk::ModifierType::CONTROL_MASK
+        ));
+        assert!(is_grab_release_sequence(
+            gdk::Key::Control_L,
+            gdk::ModifierType::ALT_MASK
+        ));
+        assert!(!is_grab_release_sequence(
+            gdk::Key::Control_L,
+            gdk::ModifierType::empty()
+        ));
+    }
+
+    #[test]
+    fn force_release_sends_each_pressed_key_once_and_suppresses_follow_up_releases() {
+        let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
+        let mut state = PressedKeyState::default();
+
+        assert!(state.press(29));
+        assert!(state.press(56));
+        state.release_all(&input_tx);
+
+        let mut released = Vec::new();
+        while let Ok(event) = input_rx.try_recv() {
+            if let super::InputEvent::KeyRelease(qnum) = event {
+                released.push(qnum);
+            }
+        }
+        released.sort_unstable();
+
+        assert_eq!(released, vec![29, 56]);
+        assert!(state.take_suppressed_release(29));
+        assert!(state.take_suppressed_release(56));
+        assert!(!state.take_suppressed_release(29));
+    }
 }

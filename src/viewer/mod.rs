@@ -3,6 +3,7 @@ mod clipboard;
 mod cursor;
 mod dmabuf;
 mod framebuffer;
+mod grab;
 mod keyboard;
 mod listener;
 mod mouse;
@@ -241,9 +242,23 @@ fn run_window(
     let clipboard_state = Rc::new(RefCell::new(clipboard::ClipboardUiState::default()));
     let cursor_state = Rc::new(RefCell::new(cursor::CursorState::default()));
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
-    if ready.keyboard_available {
-        keyboard::install_keyboard_controller(&picture, input_tx.clone());
-    }
+    let input_grab = grab::new_state();
+    let keyboard_controller = ready.keyboard_available.then(|| {
+        keyboard::install_keyboard_controller(&picture, input_tx.clone(), input_grab.clone(), {
+            let window = window.clone();
+            let picture = picture.clone();
+            let ui_state = ui_state.clone();
+            let cursor_state = cursor_state.clone();
+            let mouse_mode = mouse_mode.clone();
+            let input_grab = input_grab.clone();
+            move || {
+                if grab::release(&window, &input_grab) {
+                    ui_state.borrow_mut().last_pointer_guest_position = None;
+                    grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+                }
+            }
+        })
+    });
     if ready.clipboard_available {
         clipboard::install_host_clipboard_bridge(
             &picture,
@@ -252,7 +267,51 @@ fn run_window(
             input_tx.clone(),
         );
     }
-    mouse::install_mouse_controllers(&picture, ui_state.clone(), input_tx, mouse_mode.clone());
+    mouse::install_mouse_controllers(
+        &picture,
+        ui_state.clone(),
+        input_tx,
+        mouse_mode.clone(),
+        input_grab.clone(),
+        {
+            let window = window.clone();
+            let picture = picture.clone();
+            let ui_state = ui_state.clone();
+            let cursor_state = cursor_state.clone();
+            let mouse_mode = mouse_mode.clone();
+            let input_grab = input_grab.clone();
+            move |event| {
+                let changed = grab::activate(&window, &picture, &input_grab, event.as_ref());
+                if changed {
+                    ui_state.borrow_mut().last_pointer_guest_position = None;
+                    grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+                }
+            }
+        },
+    );
+    grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+
+    window.connect_is_active_notify({
+        let picture = picture.clone();
+        let ui_state = ui_state.clone();
+        let cursor_state = cursor_state.clone();
+        let mouse_mode = mouse_mode.clone();
+        let input_grab = input_grab.clone();
+        let keyboard_controller = keyboard_controller.clone();
+        move |window| {
+            if window.is_active() {
+                return;
+            }
+
+            if let Some(keyboard_controller) = keyboard_controller.as_ref() {
+                keyboard_controller.force_release();
+            }
+            if grab::release(window, &input_grab) {
+                ui_state.borrow_mut().last_pointer_guest_position = None;
+                grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+            }
+        }
+    });
 
     let event_rx = Rc::new(RefCell::new(event_rx));
     #[cfg(unix)]
@@ -321,6 +380,7 @@ fn run_window(
         let status_label = status_label.clone();
         let cursor_state = cursor_state.clone();
         let clipboard_state = clipboard_state.clone();
+        let input_grab = input_grab.clone();
         let ui_state = ui_state.clone();
         let mouse_mode = mouse_mode.clone();
         let window = window.clone();
@@ -366,6 +426,12 @@ fn run_window(
                     Ok(ViewerEvent::MouseModeChanged(mode)) => {
                         *mouse_mode.borrow_mut() = mode;
                         ui_state.borrow_mut().last_pointer_guest_position = None;
+                        grab::sync_cursor_capture(
+                            &picture,
+                            &cursor_state,
+                            &input_grab,
+                            &mouse_mode,
+                        );
                     }
                     Ok(ViewerEvent::Status(message)) => latest_status = Some(message),
                     Ok(ViewerEvent::Disconnected) => disconnected = true,
@@ -379,14 +445,15 @@ fn run_window(
 
             let cursor_dirty = latest_cursor_shape.is_some() || latest_cursor_visible.is_some();
             if cursor_dirty {
-                let mut cursor_state = cursor_state.borrow_mut();
+                let mut current_cursor = cursor_state.borrow_mut();
                 if let Some(shape) = latest_cursor_shape {
-                    cursor_state.set_shape(shape);
+                    current_cursor.set_shape(shape);
                 }
                 if let Some(visible) = latest_cursor_visible {
-                    cursor_state.set_visible(visible);
+                    current_cursor.set_visible(visible);
                 }
-                cursor_state.apply_to_widget(&picture);
+                drop(current_cursor);
+                grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
             }
 
             if let Some(content) = latest_guest_clipboard {
@@ -529,7 +596,14 @@ fn run_window(
 
     window.connect_close_request({
         let main_loop = main_loop.clone();
+        let window = window.clone();
+        let input_grab = input_grab.clone();
+        let keyboard_controller = keyboard_controller.clone();
         move |_| {
+            if let Some(keyboard_controller) = keyboard_controller.as_ref() {
+                keyboard_controller.force_release();
+            }
+            let _ = grab::release(&window, &input_grab);
             main_loop.quit();
             glib::Propagation::Proceed
         }
