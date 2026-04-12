@@ -105,7 +105,7 @@ pub(super) fn install_mouse_controllers(
     picture.add_controller(scroll);
 }
 
-pub(super) fn input_needs_mouse_mode(input: InputEvent) -> bool {
+pub(super) fn input_needs_mouse_mode(input: &InputEvent) -> bool {
     matches!(
         input,
         InputEvent::MouseAbs { .. } | InputEvent::MouseRel { .. }

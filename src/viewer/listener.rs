@@ -22,7 +22,7 @@ use std::os::fd::{AsFd, IntoRawFd};
 use crate::qemu::{self, ConnectTarget};
 
 use super::{
-    InputEvent, ViewerEvent, ViewerReady,
+    InputEvent, ViewerEvent, ViewerReady, clipboard,
     framebuffer::FrameStreamHandler,
     mouse::{self, MouseMode},
 };
@@ -69,6 +69,18 @@ async fn listener_main(
         .register_listener(event_tx.clone())
         .await
         .context("failed to register the QEMU display listener")?;
+    let clipboard =
+        clipboard::register_clipboard_bridge(&connection, &target.owner, event_tx.clone())
+            .await
+            .context("failed to initialize clipboard sharing")?;
+    clipboard::debug(format!(
+        "listener clipboard availability: {}",
+        if clipboard.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    ));
 
     let title = format!(
         "QD2 - {} - Console {} ({})",
@@ -101,6 +113,7 @@ async fn listener_main(
         width: target.width,
         height: target.height,
         keyboard_available,
+        clipboard_available: clipboard.is_some(),
         mouse_mode,
     }));
 
@@ -109,8 +122,34 @@ async fn listener_main(
             _ = &mut shutdown_rx => break,
             maybe_input = input_rx.recv() => match maybe_input {
                 Some(input) => {
+                    if let InputEvent::ClipboardHostChanged(text) = &input {
+                        clipboard::debug(format!(
+                            "listener received ClipboardHostChanged: {}",
+                            match text {
+                                Some(text) => format!("len={}", text.len()),
+                                None => "empty".to_owned(),
+                            }
+                        ));
+                        if let Some(clipboard) = &clipboard {
+                            if let Err(error) = clipboard.update_host_text(text.clone()).await {
+                                super::clipboard::debug(format!(
+                                    "update_host_text failed: {error:#}"
+                                ));
+                                let _ = event_tx.send(ViewerEvent::Status(format!(
+                                    "Clipboard sharing failed: {error:#}"
+                                )));
+                            }
+                        } else {
+                            super::clipboard::debug(
+                                "dropping ClipboardHostChanged because no QEMU clipboard is available",
+                            );
+                        }
+                        continue;
+                    }
+
+                    let needs_mouse_mode = mouse::input_needs_mouse_mode(&input);
                     if let Err(error) = console.handle_input(input).await {
-                        let recovered = if mouse::input_needs_mouse_mode(input) {
+                        let recovered = if needs_mouse_mode {
                             match console.mouse_is_absolute().await {
                                 Ok(is_absolute) => {
                                     let detected_mode = MouseMode::from_is_absolute(is_absolute);
@@ -207,6 +246,7 @@ impl RemoteConsole {
                 .release(keycode)
                 .await
                 .with_context(|| format!("failed to send key release for qnum {keycode}")),
+            InputEvent::ClipboardHostChanged(_) => Ok(()),
             InputEvent::MousePress(button) => self
                 .mouse
                 .press(button)

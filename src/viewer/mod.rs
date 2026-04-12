@@ -1,4 +1,5 @@
 mod chrome;
+mod clipboard;
 mod cursor;
 mod dmabuf;
 mod framebuffer;
@@ -237,10 +238,19 @@ fn run_window(
     picture.add_controller(viewer_shortcuts);
 
     let ui_state = Rc::new(RefCell::new(UiState::default()));
+    let clipboard_state = Rc::new(RefCell::new(clipboard::ClipboardUiState::default()));
     let cursor_state = Rc::new(RefCell::new(cursor::CursorState::default()));
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
     if ready.keyboard_available {
         keyboard::install_keyboard_controller(&picture, input_tx.clone());
+    }
+    if ready.clipboard_available {
+        clipboard::install_host_clipboard_bridge(
+            &picture,
+            &window,
+            clipboard_state.clone(),
+            input_tx.clone(),
+        );
     }
     mouse::install_mouse_controllers(&picture, ui_state.clone(), input_tx, mouse_mode.clone());
 
@@ -310,6 +320,7 @@ fn run_window(
         let picture = picture.clone();
         let status_label = status_label.clone();
         let cursor_state = cursor_state.clone();
+        let clipboard_state = clipboard_state.clone();
         let ui_state = ui_state.clone();
         let mouse_mode = mouse_mode.clone();
         let window = window.clone();
@@ -320,6 +331,7 @@ fn run_window(
             let mut latest_presentation = None;
             #[cfg(unix)]
             let mut dmabuf_updates = Vec::new();
+            let mut latest_guest_clipboard = None;
             let mut latest_cursor_shape = None;
             let mut latest_cursor_visible = None;
             let mut latest_status = None;
@@ -345,6 +357,9 @@ fn run_window(
                     Ok(ViewerEvent::CursorVisibilityChanged(visible)) => {
                         latest_cursor_visible = Some(visible)
                     }
+                    Ok(ViewerEvent::ClipboardGuestText(text)) => {
+                        latest_guest_clipboard = Some(text)
+                    }
                     Ok(ViewerEvent::MouseModeChanged(mode)) => {
                         *mouse_mode.borrow_mut() = mode;
                         ui_state.borrow_mut().last_pointer_guest_position = None;
@@ -369,6 +384,14 @@ fn run_window(
                     cursor_state.set_visible(visible);
                 }
                 cursor_state.apply_to_widget(&picture);
+            }
+
+            if let Some(text) = latest_guest_clipboard {
+                if let Err(error) =
+                    clipboard::apply_guest_text_clipboard(&picture, &clipboard_state, &text)
+                {
+                    latest_status = Some(format!("Clipboard sync failed: {error:#}"));
+                }
             }
 
             if let Some(presentation) = latest_presentation {
@@ -535,6 +558,7 @@ struct ViewerReady {
     width: u32,
     height: u32,
     keyboard_available: bool,
+    clipboard_available: bool,
     mouse_mode: MouseMode,
 }
 
@@ -550,6 +574,7 @@ enum ViewerEvent {
     Dmabuf(dmabuf::DmabufFrame),
     #[cfg(unix)]
     DmabufUpdate(UpdateDMABUF),
+    ClipboardGuestText(String),
     CursorShapeChanged(Option<cursor::GuestCursor>),
     CursorVisibilityChanged(bool),
     MouseModeChanged(MouseMode),
@@ -557,10 +582,11 @@ enum ViewerEvent {
     Disconnected,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum InputEvent {
     KeyPress(u32),
     KeyRelease(u32),
+    ClipboardHostChanged(Option<String>),
     MousePress(MouseButton),
     MouseRelease(MouseButton),
     MouseAbs { x: u32, y: u32 },
@@ -644,15 +670,15 @@ mod tests {
 
     #[test]
     fn mouse_mode_is_only_rechecked_for_motion_inputs() {
-        assert!(input_needs_mouse_mode(InputEvent::MouseAbs { x: 1, y: 2 }));
-        assert!(input_needs_mouse_mode(InputEvent::MouseRel {
+        assert!(input_needs_mouse_mode(&InputEvent::MouseAbs { x: 1, y: 2 }));
+        assert!(input_needs_mouse_mode(&InputEvent::MouseRel {
             dx: 3,
             dy: -4
         }));
-        assert!(!input_needs_mouse_mode(InputEvent::MousePress(
+        assert!(!input_needs_mouse_mode(&InputEvent::MousePress(
             qemu_display::MouseButton::Left
         )));
-        assert!(!input_needs_mouse_mode(InputEvent::KeyPress(42)));
+        assert!(!input_needs_mouse_mode(&InputEvent::KeyPress(42)));
     }
 
     #[test]
