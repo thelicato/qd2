@@ -1,3 +1,8 @@
+mod chrome;
+mod keyboard;
+mod mouse;
+mod utils;
+
 use std::{
     cell::RefCell,
     convert::TryFrom,
@@ -35,6 +40,7 @@ use zbus::{
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
+use self::mouse::MouseMode;
 use crate::qemu::{self, ConnectTarget};
 
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
@@ -48,37 +54,8 @@ const PIXMAN_R8G8B8X8: u32 = pixman_format_code_t_PIXMAN_r8g8b8x8;
 const PIXMAN_X8B8G8R8: u32 = pixman_format_code_t_PIXMAN_x8b8g8r8;
 const PIXMAN_X8R8G8B8: u32 = pixman_format_code_t_PIXMAN_x8r8g8b8;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
-const APP_ICON_PNG: &[u8] = include_bytes!("../logo.png");
-const FULLSCREEN_HOVER_HIDE_DELAY: Duration = Duration::from_millis(900);
-const VIEWER_CSS: &str = r#"
-.viewer-floating-controls {
-    background: rgba(28, 28, 32, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 999px;
-    padding: 6px 8px;
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
-}
 
-.viewer-floating-controls button,
-.viewer-floating-controls menubutton {
-    min-width: 34px;
-    min-height: 34px;
-}
-
-.viewer-title {
-    font-weight: 600;
-}
-
-.viewer-popover {
-    padding: 6px;
-}
-
-.viewer-popover button {
-    padding: 8px 12px;
-    border-radius: 10px;
-}
-"#;
-
+/// Start the GTK viewer and the background listener that mirrors the QEMU display stream.
 pub fn connect(target: ConnectTarget) -> Result<()> {
     let (event_tx, event_rx) = std_mpsc::channel();
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
@@ -188,7 +165,7 @@ async fn listener_main(
             maybe_input = input_rx.recv() => match maybe_input {
                 Some(input) => {
                     if let Err(error) = console.handle_input(input).await {
-                        let recovered = if input_needs_mouse_mode(input) {
+                        let recovered = if mouse::input_needs_mouse_mode(input) {
                             match console.mouse_is_absolute().await {
                                 Ok(is_absolute) => {
                                     let detected_mode = MouseMode::from_is_absolute(is_absolute);
@@ -229,6 +206,8 @@ async fn listener_main(
     Ok(())
 }
 
+/// Build the GTK window and keep it in sync with the latest framebuffer or
+/// DMABUF presentation coming from the listener thread.
 fn run_window(
     target: &ConnectTarget,
     ready: &ViewerReady,
@@ -238,8 +217,8 @@ fn run_window(
     gtk::init().context("failed to initialize GTK4")?;
 
     let main_loop = glib::MainLoop::new(None, false);
-    let (window_width, window_height) = suggested_window_size(ready.width, ready.height);
-    let app_icon = load_app_icon().ok();
+    let (window_width, window_height) = utils::suggested_window_size(ready.width, ready.height);
+    let app_icon = utils::load_app_icon().ok();
 
     let picture = gtk::Picture::new();
     picture.set_hexpand(true);
@@ -272,20 +251,20 @@ fn run_window(
     window.set_resizable(true);
     if let Some(icon) = app_icon.clone() {
         window.connect_realize(move |window| {
-            if let Err(error) = apply_window_icon(window, &icon) {
+            if let Err(error) = utils::apply_window_icon(window, &icon) {
                 eprintln!("QD2 icon error: {error:#}");
             }
         });
     }
 
     let display = gtk::prelude::RootExt::display(&window);
-    install_viewer_css(&display);
+    chrome::install_viewer_css(&display);
 
     let title_label = gtk::Label::new(Some(&ready.title));
     title_label.add_css_class("viewer-title");
 
     let (titlebar_controls, titlebar_fullscreen_button) =
-        build_viewer_controls(&window, app_icon.as_ref());
+        chrome::build_viewer_controls(&window, app_icon.as_ref());
     let header_bar = gtk::HeaderBar::new();
     header_bar.set_show_title_buttons(true);
     header_bar.set_title_widget(Some(&title_label));
@@ -293,7 +272,7 @@ fn run_window(
     window.set_titlebar(Some(&header_bar));
 
     let (floating_controls, overlay_fullscreen_button) =
-        build_viewer_controls(&window, app_icon.as_ref());
+        chrome::build_viewer_controls(&window, app_icon.as_ref());
     floating_controls.add_css_class("viewer-floating-controls");
 
     let fullscreen_revealer = gtk::Revealer::builder()
@@ -321,13 +300,13 @@ fn run_window(
     overlay.set_measure_overlay(&fullscreen_hotspot, false);
     overlay.set_clip_overlay(&fullscreen_hotspot, false);
 
-    let fullscreen_state = Rc::new(RefCell::new(FullscreenChromeState::default()));
+    let fullscreen_state = Rc::new(RefCell::new(chrome::FullscreenChromeState::default()));
     let titlebar_widget = header_bar.clone().upcast::<gtk::Widget>();
     let fullscreen_buttons = vec![
         titlebar_fullscreen_button.clone(),
         overlay_fullscreen_button.clone(),
     ];
-    sync_fullscreen_chrome(
+    chrome::sync_fullscreen_chrome(
         &window,
         &titlebar_widget,
         &fullscreen_revealer,
@@ -342,7 +321,7 @@ fn run_window(
         let fullscreen_buttons = fullscreen_buttons.clone();
         let fullscreen_state = fullscreen_state.clone();
         move |window| {
-            sync_fullscreen_chrome(
+            chrome::sync_fullscreen_chrome(
                 window,
                 &header_bar,
                 &fullscreen_revealer,
@@ -359,15 +338,17 @@ fn run_window(
         let fullscreen_revealer = fullscreen_revealer.clone();
         let fullscreen_state = fullscreen_state.clone();
         move |_, _, _| {
-            reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state);
-            schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state);
+            chrome::reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state);
+            chrome::schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state);
         }
     });
     hotspot_motion.connect_leave({
         let window = window.clone();
         let fullscreen_revealer = fullscreen_revealer.clone();
         let fullscreen_state = fullscreen_state.clone();
-        move |_| schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
+        move |_| {
+            chrome::schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
+        }
     });
     fullscreen_hotspot.add_controller(hotspot_motion);
 
@@ -375,13 +356,15 @@ fn run_window(
     floating_motion.connect_enter({
         let fullscreen_revealer = fullscreen_revealer.clone();
         let fullscreen_state = fullscreen_state.clone();
-        move |_, _, _| reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state)
+        move |_, _, _| chrome::reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state)
     });
     floating_motion.connect_leave({
         let window = window.clone();
         let fullscreen_revealer = fullscreen_revealer.clone();
         let fullscreen_state = fullscreen_state.clone();
-        move |_| schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
+        move |_| {
+            chrome::schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
+        }
     });
     floating_controls.add_controller(floating_motion);
 
@@ -391,7 +374,7 @@ fn run_window(
         let window = window.clone();
         move |_, keyval, _, _| match keyval {
             gdk::Key::F11 => {
-                toggle_fullscreen(&window);
+                chrome::toggle_fullscreen(&window);
                 glib::Propagation::Stop
             }
             gdk::Key::Escape if window.is_fullscreen() => {
@@ -405,13 +388,10 @@ fn run_window(
 
     let ui_state = Rc::new(RefCell::new(UiState::default()));
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
-    install_input_controllers(
-        &picture,
-        ui_state.clone(),
-        input_tx,
-        mouse_mode.clone(),
-        ready.keyboard_available,
-    );
+    if ready.keyboard_available {
+        keyboard::install_keyboard_controller(&picture, input_tx.clone());
+    }
+    mouse::install_mouse_controllers(&picture, ui_state.clone(), input_tx, mouse_mode.clone());
 
     let event_rx = Rc::new(RefCell::new(event_rx));
     #[cfg(unix)]
@@ -649,226 +629,6 @@ fn run_window(
     picture.grab_focus();
     main_loop.run();
     Ok(())
-}
-
-fn load_app_icon() -> Result<gdk::Texture> {
-    let bytes = glib::Bytes::from_static(APP_ICON_PNG);
-    gdk::Texture::from_bytes(&bytes).context("failed to decode embedded app icon")
-}
-
-fn apply_window_icon(window: &gtk::Window, icon: &gdk::Texture) -> Result<()> {
-    let native = window
-        .native()
-        .context("GTK window does not expose a native surface yet")?;
-    let surface = native
-        .surface()
-        .context("GTK window does not have a GDK surface yet")?;
-    let toplevel = surface
-        .dynamic_cast_ref::<gdk::Toplevel>()
-        .context("GTK surface is not a toplevel window")?;
-    toplevel.set_icon_list(std::slice::from_ref(icon));
-    Ok(())
-}
-
-#[derive(Default)]
-struct FullscreenChromeState {
-    hide_source: Option<glib::SourceId>,
-}
-
-fn install_viewer_css(display: &gdk::Display) {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(VIEWER_CSS);
-    gtk::style_context_add_provider_for_display(
-        display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-}
-
-fn build_viewer_controls(
-    window: &gtk::Window,
-    app_icon: Option<&gdk::Texture>,
-) -> (gtk::Box, gtk::Button) {
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-
-    let fullscreen_button = gtk::Button::from_icon_name("view-fullscreen-symbolic");
-    fullscreen_button.add_css_class("flat");
-    fullscreen_button.add_css_class("circular");
-    fullscreen_button.set_tooltip_text(Some("Fullscreen"));
-    fullscreen_button.connect_clicked({
-        let window = window.clone();
-        move |_| toggle_fullscreen(&window)
-    });
-
-    let popover = gtk::Popover::new();
-    popover.set_has_arrow(false);
-    popover.add_css_class("viewer-popover");
-
-    let popover_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-
-    let shortcuts_button = gtk::Button::with_label("Keyboard shortcuts");
-    shortcuts_button.set_halign(gtk::Align::Fill);
-    shortcuts_button.add_css_class("flat");
-    shortcuts_button.connect_clicked({
-        let popover = popover.clone();
-        let window = window.clone();
-        move |_| {
-            popover.popdown();
-            show_keyboard_shortcuts(&window);
-        }
-    });
-    popover_box.append(&shortcuts_button);
-
-    let about_button = gtk::Button::with_label("About");
-    about_button.set_halign(gtk::Align::Fill);
-    about_button.add_css_class("flat");
-    about_button.connect_clicked({
-        let popover = popover.clone();
-        let window = window.clone();
-        let app_icon = app_icon.cloned();
-        move |_| {
-            popover.popdown();
-            show_about_dialog(&window, app_icon.clone());
-        }
-    });
-    popover_box.append(&about_button);
-
-    popover.set_child(Some(&popover_box));
-
-    let menu_button = gtk::MenuButton::new();
-    menu_button.set_icon_name("view-more-symbolic");
-    menu_button.set_tooltip_text(Some("More"));
-    menu_button.add_css_class("flat");
-    menu_button.add_css_class("circular");
-    menu_button.set_popover(Some(&popover));
-
-    controls.append(&fullscreen_button);
-    controls.append(&menu_button);
-
-    (controls, fullscreen_button)
-}
-
-fn show_keyboard_shortcuts(window: &gtk::Window) {
-    let shortcuts = gtk::ShortcutsWindow::builder()
-        .title("Keyboard Shortcuts")
-        .modal(true)
-        .transient_for(window)
-        .build();
-
-    let section = gtk::ShortcutsSection::builder()
-        .title("Viewer")
-        .section_name("viewer")
-        .build();
-    let group = gtk::ShortcutsGroup::builder().title("Display").build();
-
-    for (title, accelerator) in [
-        ("Toggle fullscreen", "F11"),
-        ("Leave fullscreen", "Escape"),
-        ("Rotate DMABUF view", "<Control><Alt>r"),
-        ("Toggle DMABUF vertical flip", "<Control><Alt>f"),
-        ("Reset DMABUF transform", "<Control><Alt>0"),
-    ] {
-        let shortcut = gtk::ShortcutsShortcut::builder()
-            .title(title)
-            .accelerator(accelerator)
-            .build();
-        group.add_shortcut(&shortcut);
-    }
-
-    section.add_group(&group);
-    shortcuts.add_section(&section);
-    shortcuts.present();
-}
-
-fn show_about_dialog(window: &gtk::Window, app_icon: Option<gdk::Texture>) {
-    let about = gtk::AboutDialog::new();
-    about.set_transient_for(Some(window));
-    about.set_modal(true);
-    about.set_program_name(Some("QD2"));
-    about.set_version(Some(env!("CARGO_PKG_VERSION")));
-    about.set_comments(Some("QEMU D-Bus Display client"));
-    if let Some(icon) = app_icon.as_ref() {
-        about.set_logo(Some(icon));
-    }
-    about.present();
-}
-
-fn toggle_fullscreen(window: &gtk::Window) {
-    if window.is_fullscreen() {
-        window.unfullscreen();
-    } else {
-        window.fullscreen();
-    }
-}
-
-fn update_fullscreen_button(button: &gtk::Button, is_fullscreen: bool) {
-    if is_fullscreen {
-        button.set_icon_name("view-restore-symbolic");
-        button.set_tooltip_text(Some("Leave fullscreen"));
-    } else {
-        button.set_icon_name("view-fullscreen-symbolic");
-        button.set_tooltip_text(Some("Fullscreen"));
-    }
-}
-
-fn cancel_fullscreen_bar_hide(state: &Rc<RefCell<FullscreenChromeState>>) {
-    if let Some(source) = state.borrow_mut().hide_source.take() {
-        source.remove();
-    }
-}
-
-fn reveal_fullscreen_bar(revealer: &gtk::Revealer, state: &Rc<RefCell<FullscreenChromeState>>) {
-    cancel_fullscreen_bar_hide(state);
-    revealer.set_visible(true);
-    revealer.set_reveal_child(true);
-}
-
-fn schedule_hide_fullscreen_bar(
-    window: &gtk::Window,
-    revealer: &gtk::Revealer,
-    state: &Rc<RefCell<FullscreenChromeState>>,
-) {
-    if !window.is_fullscreen() {
-        return;
-    }
-
-    cancel_fullscreen_bar_hide(state);
-
-    let revealer = revealer.clone();
-    let state_handle = state.clone();
-    let source = glib::timeout_add_local_once(FULLSCREEN_HOVER_HIDE_DELAY, move || {
-        revealer.set_reveal_child(false);
-        revealer.set_visible(false);
-        state_handle.borrow_mut().hide_source = None;
-    });
-    state.borrow_mut().hide_source = Some(source);
-}
-
-fn sync_fullscreen_chrome(
-    window: &gtk::Window,
-    header_bar: &gtk::Widget,
-    fullscreen_revealer: &gtk::Revealer,
-    fullscreen_hotspot: &gtk::Box,
-    fullscreen_buttons: &[gtk::Button],
-    fullscreen_state: &Rc<RefCell<FullscreenChromeState>>,
-) {
-    let is_fullscreen = window.is_fullscreen();
-    for button in fullscreen_buttons {
-        update_fullscreen_button(button, is_fullscreen);
-    }
-
-    if is_fullscreen {
-        window.set_titlebar(None::<&gtk::Widget>);
-        fullscreen_hotspot.set_visible(true);
-        reveal_fullscreen_bar(fullscreen_revealer, fullscreen_state);
-        schedule_hide_fullscreen_bar(window, fullscreen_revealer, fullscreen_state);
-    } else {
-        cancel_fullscreen_bar_hide(fullscreen_state);
-        fullscreen_revealer.set_reveal_child(false);
-        fullscreen_revealer.set_visible(false);
-        fullscreen_hotspot.set_visible(false);
-        window.set_titlebar(Some(header_bar));
-    }
 }
 
 enum PresentationEvent {
@@ -1233,23 +993,6 @@ enum ViewerEvent {
     MouseModeChanged(MouseMode),
     Status(String),
     Disconnected,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum MouseMode {
-    Disabled,
-    Relative,
-    Absolute,
-}
-
-impl MouseMode {
-    fn from_is_absolute(is_absolute: bool) -> Self {
-        if is_absolute {
-            Self::Absolute
-        } else {
-            Self::Relative
-        }
-    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1976,6 +1719,8 @@ impl RemoteConsole {
         }
     }
 
+    /// Register the local peer-to-peer listener object that QEMU pushes scanout
+    /// updates into for this console.
     async fn register_listener(&mut self, event_tx: Sender<ViewerEvent>) -> Result<()> {
         #[cfg(not(unix))]
         {
@@ -2319,422 +2064,12 @@ impl LocalConsoleListenerDmabuf2 {
     }
 }
 
-fn install_input_controllers(
-    picture: &gtk::Picture,
-    ui_state: Rc<RefCell<UiState>>,
-    input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
-    mouse_mode: Rc<RefCell<MouseMode>>,
-    keyboard_available: bool,
-) {
-    if keyboard_available {
-        let key_controller = gtk::EventControllerKey::new();
-        key_controller.connect_key_pressed({
-            let input_tx = input_tx.clone();
-            move |_, _, keycode, _| match gdk_keycode_to_qnum(keycode) {
-                Some(qnum) => {
-                    let _ = input_tx.send(InputEvent::KeyPress(qnum));
-                    glib::Propagation::Stop
-                }
-                None => glib::Propagation::Proceed,
-            }
-        });
-        key_controller.connect_key_released({
-            let input_tx = input_tx.clone();
-            move |_, _, keycode, _| {
-                if let Some(qnum) = gdk_keycode_to_qnum(keycode) {
-                    let _ = input_tx.send(InputEvent::KeyRelease(qnum));
-                }
-            }
-        });
-        picture.add_controller(key_controller);
-    }
-
-    if *mouse_mode.borrow() == MouseMode::Disabled {
-        return;
-    }
-
-    let click = gtk::GestureClick::new();
-    click.set_button(0);
-    click.connect_pressed({
-        let picture = picture.clone();
-        let ui_state = ui_state.clone();
-        let input_tx = input_tx.clone();
-        let mouse_mode = mouse_mode.clone();
-        move |gesture, _, x, y| {
-            picture.grab_focus();
-            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
-
-            if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
-                let _ = input_tx.send(InputEvent::MousePress(button));
-            }
-        }
-    });
-    click.connect_released({
-        let picture = picture.clone();
-        let ui_state = ui_state.clone();
-        let input_tx = input_tx.clone();
-        let mouse_mode = mouse_mode.clone();
-        move |gesture, _, x, y| {
-            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
-
-            if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
-                let _ = input_tx.send(InputEvent::MouseRelease(button));
-            }
-        }
-    });
-    picture.add_controller(click);
-
-    let motion = gtk::EventControllerMotion::new();
-    motion.connect_enter({
-        let picture = picture.clone();
-        let ui_state = ui_state.clone();
-        let input_tx = input_tx.clone();
-        let mouse_mode = mouse_mode.clone();
-        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
-    });
-    motion.connect_motion({
-        let picture = picture.clone();
-        let ui_state = ui_state.clone();
-        let input_tx = input_tx.clone();
-        let mouse_mode = mouse_mode.clone();
-        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
-    });
-    motion.connect_leave({
-        let ui_state = ui_state.clone();
-        move |_| {
-            ui_state.borrow_mut().last_pointer_guest_position = None;
-        }
-    });
-    picture.add_controller(motion);
-
-    let scroll = gtk::EventControllerScroll::new(
-        gtk::EventControllerScrollFlags::BOTH_AXES | gtk::EventControllerScrollFlags::DISCRETE,
-    );
-    scroll.connect_scroll({
-        let input_tx = input_tx.clone();
-        move |_, dx, dy| {
-            let handled = emit_scroll_buttons(&input_tx, dx, dy);
-            if handled {
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
-            }
-        }
-    });
-    picture.add_controller(scroll);
-}
-
-fn sync_mouse_position(
-    picture: &gtk::Picture,
-    ui_state: &Rc<RefCell<UiState>>,
-    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
-    mouse_mode: &Rc<RefCell<MouseMode>>,
-    x: f64,
-    y: f64,
-) {
-    let frame_size = ui_state.borrow().frame_size;
-    let Some((frame_width, frame_height)) = frame_size else {
-        return;
-    };
-    let Some((guest_x, guest_y)) = widget_coords_to_guest_position(
-        picture.width(),
-        picture.height(),
-        frame_width,
-        frame_height,
-        x,
-        y,
-    ) else {
-        ui_state.borrow_mut().last_pointer_guest_position = None;
-        return;
-    };
-
-    let mut ui_state = ui_state.borrow_mut();
-    match *mouse_mode.borrow() {
-        MouseMode::Disabled => {}
-        MouseMode::Absolute => {
-            let _ = input_tx.send(InputEvent::MouseAbs {
-                x: guest_x,
-                y: guest_y,
-            });
-            ui_state.last_pointer_guest_position = Some((guest_x, guest_y));
-        }
-        MouseMode::Relative => {
-            if let Some((prev_x, prev_y)) = ui_state.last_pointer_guest_position {
-                let dx = guest_x as i32 - prev_x as i32;
-                let dy = guest_y as i32 - prev_y as i32;
-                if dx != 0 || dy != 0 {
-                    let _ = input_tx.send(InputEvent::MouseRel { dx, dy });
-                }
-            }
-            ui_state.last_pointer_guest_position = Some((guest_x, guest_y));
-        }
-    }
-}
-
-fn input_needs_mouse_mode(input: InputEvent) -> bool {
-    matches!(
-        input,
-        InputEvent::MouseAbs { .. } | InputEvent::MouseRel { .. }
-    )
-}
-
-fn emit_scroll_buttons(
-    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
-    _dx: f64,
-    dy: f64,
-) -> bool {
-    let mut handled = false;
-
-    for _ in 0..scroll_ticks(dy).unsigned_abs() {
-        let button = if dy.is_sign_positive() {
-            MouseButton::WheelDown
-        } else {
-            MouseButton::WheelUp
-        };
-        let _ = input_tx.send(InputEvent::MouseWheel(button));
-        handled = true;
-    }
-
-    handled
-}
-
-fn scroll_ticks(delta: f64) -> i32 {
-    if delta.abs() < f64::EPSILON {
-        0
-    } else {
-        let rounded = delta.round() as i32;
-        if rounded == 0 {
-            delta.signum() as i32
-        } else {
-            rounded
-        }
-    }
-}
-
-fn gtk_button_to_qemu(button: u32) -> Option<MouseButton> {
-    match button {
-        1 => Some(MouseButton::Left),
-        2 => Some(MouseButton::Middle),
-        3 => Some(MouseButton::Right),
-        8 => Some(MouseButton::Side),
-        9 => Some(MouseButton::Extra),
-        _ => None,
-    }
-}
-
-fn widget_coords_to_guest_position(
-    widget_width: i32,
-    widget_height: i32,
-    frame_width: u32,
-    frame_height: u32,
-    x: f64,
-    y: f64,
-) -> Option<(u32, u32)> {
-    if widget_width <= 0 || widget_height <= 0 || frame_width == 0 || frame_height == 0 {
-        return None;
-    }
-
-    let widget_width = f64::from(widget_width);
-    let widget_height = f64::from(widget_height);
-    let frame_width_f = f64::from(frame_width);
-    let frame_height_f = f64::from(frame_height);
-    let scale = (widget_width / frame_width_f).min(widget_height / frame_height_f);
-    if !scale.is_finite() || scale <= 0.0 {
-        return None;
-    }
-
-    let display_width = frame_width_f * scale;
-    let display_height = frame_height_f * scale;
-    let x_offset = (widget_width - display_width) / 2.0;
-    let y_offset = (widget_height - display_height) / 2.0;
-    let local_x = x - x_offset;
-    let local_y = y - y_offset;
-    if local_x < 0.0 || local_y < 0.0 || local_x > display_width || local_y > display_height {
-        return None;
-    }
-
-    let guest_x = (local_x / scale)
-        .floor()
-        .clamp(0.0, f64::from(frame_width.saturating_sub(1))) as u32;
-    let guest_y = (local_y / scale)
-        .floor()
-        .clamp(0.0, f64::from(frame_height.saturating_sub(1))) as u32;
-
-    Some((guest_x, guest_y))
-}
-
-fn gdk_keycode_to_qnum(keycode: u32) -> Option<u32> {
-    keycode.checked_sub(8).and_then(linux_keycode_to_qnum)
-}
-
-fn linux_keycode_to_qnum(linux_keycode: u32) -> Option<u32> {
-    let qnum = match linux_keycode {
-        1..=83 => linux_keycode,
-        85 => 118,
-        86..=88 => linux_keycode,
-        89 => 115,
-        90 => 120,
-        91 => 119,
-        92 => 121,
-        93 => 112,
-        94 => 123,
-        95 => 92,
-        96 => 156,
-        97 => 157,
-        98 => 181,
-        99 => 183,
-        100 => 184,
-        101 => 91,
-        102 => 199,
-        103 => 200,
-        104 => 201,
-        105 => 203,
-        106 => 205,
-        107 => 207,
-        108 => 208,
-        109 => 209,
-        110 => 210,
-        111 => 211,
-        112 => 239,
-        113 => 160,
-        114 => 174,
-        115 => 176,
-        116 => 222,
-        117 => 89,
-        118 => 206,
-        119 => 198,
-        120 => 139,
-        121 => 126,
-        122 => 114,
-        123 => 113,
-        124 => 125,
-        125 => 219,
-        126 => 220,
-        127 => 221,
-        128 => 232,
-        129 => 133,
-        130 => 134,
-        131 => 135,
-        132 => 140,
-        133 => 248,
-        134 => 100,
-        135 => 101,
-        136 => 193,
-        137 => 188,
-        138 => 245,
-        139 => 158,
-        140 => 161,
-        141 => 102,
-        142 => 223,
-        143 => 227,
-        144 => 103,
-        145 => 104,
-        146 => 105,
-        147 => 147,
-        148 => 159,
-        149 => 151,
-        150 => 130,
-        151 => 106,
-        152 => 146,
-        153 => 107,
-        154 => 166,
-        155 => 236,
-        156 => 230,
-        157 => 235,
-        158 => 234,
-        159 => 233,
-        160 => 163,
-        161 => 108,
-        162 => 253,
-        163 => 153,
-        164 => 162,
-        165 => 144,
-        166 => 164,
-        167 => 177,
-        168 => 152,
-        169 => 99,
-        171 => 129,
-        172 => 178,
-        173 => 231,
-        176 => 136,
-        177 => 117,
-        178 => 143,
-        179 => 246,
-        180 => 251,
-        181 => 137,
-        182 => 138,
-        183 => 93,
-        184 => 94,
-        185 => 95,
-        186 => 85,
-        187 => 131,
-        188 => 247,
-        189 => 132,
-        190 => 90,
-        191 => 116,
-        192 => 249,
-        193 => 109,
-        194 => 111,
-        200 => 168,
-        201 => 169,
-        202 => 171,
-        203 => 172,
-        204 => 173,
-        205 => 165,
-        206 => 175,
-        207 => 179,
-        208 => 180,
-        209 => 182,
-        210 => 185,
-        211 => 186,
-        212 => 187,
-        213 => 189,
-        214 => 190,
-        215 => 191,
-        216 => 192,
-        217 => 229,
-        218 => 194,
-        219 => 195,
-        220 => 196,
-        221 => 197,
-        222 => 148,
-        223 => 202,
-        224 => 204,
-        225 => 212,
-        226 => 237,
-        227 => 214,
-        228 => 215,
-        229 => 216,
-        230 => 217,
-        231 => 218,
-        232 => 228,
-        233 => 142,
-        234 => 213,
-        235 => 240,
-        236 => 241,
-        237 => 242,
-        238 => 243,
-        239 => 244,
-        _ => return None,
-    };
-
-    Some(qnum)
-}
-
-fn suggested_window_size(width: u32, height: u32) -> (i32, i32) {
-    let width = width.clamp(640, 1280);
-    let height = height.clamp(480, 960);
-    (
-        i32::try_from(width).unwrap_or(1280),
-        i32::try_from(height).unwrap_or(960),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Framebuffer, InputEvent, PixelFormat, dmabuf_update_rectangle, input_needs_mouse_mode,
-        linux_keycode_to_qnum, widget_coords_to_guest_position,
+        Framebuffer, InputEvent, PixelFormat, dmabuf_update_rectangle,
+        keyboard::linux_keycode_to_qnum,
+        mouse::{input_needs_mouse_mode, widget_coords_to_guest_position},
     };
     use qemu_display::{Scanout, UpdateDMABUF};
 
