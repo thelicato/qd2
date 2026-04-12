@@ -225,12 +225,66 @@ fn run_window(
     let event_rx = Rc::new(RefCell::new(event_rx));
     #[cfg(unix)]
     let current_dmabuf = Rc::new(RefCell::new(None::<DmabufPresentation>));
+    #[cfg(unix)]
+    let dmabuf_transform = Rc::new(RefCell::new(DmabufViewTransform::default()));
     let display = gtk::prelude::RootExt::display(&window);
     let window_base_title = ready.title.clone();
+    #[cfg(unix)]
+    {
+        let shortcuts = gtk::EventControllerKey::new();
+        shortcuts.set_propagation_phase(gtk::PropagationPhase::Capture);
+        shortcuts.connect_key_pressed({
+            let current_dmabuf = current_dmabuf.clone();
+            let dmabuf_transform = dmabuf_transform.clone();
+            let picture = picture.clone();
+            let status_label = status_label.clone();
+            let ui_state = ui_state.clone();
+            let window = window.clone();
+            let window_base_title = window_base_title.clone();
+            move |_, keyval, _, state| {
+                let ctrl_alt = state.contains(gdk::ModifierType::CONTROL_MASK)
+                    && state.contains(gdk::ModifierType::ALT_MASK);
+                if !ctrl_alt {
+                    return glib::Propagation::Proceed;
+                }
+
+                {
+                    let mut transform = dmabuf_transform.borrow_mut();
+                    match keyval {
+                        gdk::Key::R | gdk::Key::r => transform.rotate_clockwise(),
+                        gdk::Key::F | gdk::Key::f => transform.toggle_vertical_flip(),
+                        gdk::Key::_0 => transform.reset(),
+                        _ => return glib::Propagation::Proceed,
+                    }
+
+                    if let Some(presentation) = current_dmabuf.borrow().as_ref() {
+                        if let Err(error) = present_dmabuf_paintable(
+                            &picture,
+                            &status_label,
+                            &ui_state,
+                            &window,
+                            &window_base_title,
+                            presentation,
+                            *transform,
+                        ) {
+                            eprintln!("QD2 DMABUF transform error: {error:#}");
+                        }
+                    }
+
+                    eprintln!("QD2 {}", transform.describe());
+                }
+
+                glib::Propagation::Stop
+            }
+        });
+        picture.add_controller(shortcuts);
+    }
     glib::timeout_add_local(FRAME_POLL_INTERVAL, {
         let event_rx = event_rx.clone();
         #[cfg(unix)]
         let current_dmabuf = current_dmabuf.clone();
+        #[cfg(unix)]
+        let dmabuf_transform = dmabuf_transform.clone();
         let display = display.clone();
         let picture = picture.clone();
         let status_label = status_label.clone();
@@ -302,26 +356,27 @@ fn run_window(
                     #[cfg(unix)]
                     PresentationEvent::Dmabuf(scanout) => {
                         match build_dmabuf_presentation(&display, scanout) {
-                            Ok(presentation) => match presentation.to_paintable() {
-                                Ok(paintable) => {
-                                    *current_dmabuf.borrow_mut() = Some(presentation);
-                                    present_paintable(
-                                        &picture,
-                                        &status_label,
-                                        &ui_state,
-                                        &window,
-                                        &window_base_title,
-                                        &paintable,
-                                        paintable.intrinsic_width().max(0) as u32,
-                                        paintable.intrinsic_height().max(0) as u32,
-                                    );
+                            Ok(presentation) => {
+                                let transform = *dmabuf_transform.borrow();
+                                match present_dmabuf_paintable(
+                                    &picture,
+                                    &status_label,
+                                    &ui_state,
+                                    &window,
+                                    &window_base_title,
+                                    &presentation,
+                                    transform,
+                                ) {
+                                    Ok(()) => {
+                                        *current_dmabuf.borrow_mut() = Some(presentation);
+                                    }
+                                    Err(error) => {
+                                        latest_status = Some(format!(
+                                            "Could not prepare the DMABUF scanout for display: {error:#}"
+                                        ));
+                                    }
                                 }
-                                Err(error) => {
-                                    latest_status = Some(format!(
-                                        "Could not prepare the DMABUF scanout for display: {error:#}"
-                                    ));
-                                }
-                            },
+                            }
                             Err(error) => {
                                 *current_dmabuf.borrow_mut() = None;
                                 latest_status =
@@ -336,10 +391,20 @@ fn run_window(
             if !dmabuf_updates.is_empty() {
                 let refreshed = {
                     let mut current_dmabuf = current_dmabuf.borrow_mut();
+                    let transform = *dmabuf_transform.borrow();
                     match current_dmabuf.as_mut() {
                         Some(presentation) => match presentation.refresh(&display, &dmabuf_updates)
                         {
-                            Ok(()) => presentation.to_paintable().map(Some),
+                            Ok(()) => present_dmabuf_paintable(
+                                &picture,
+                                &status_label,
+                                &ui_state,
+                                &window,
+                                &window_base_title,
+                                presentation,
+                                transform,
+                            )
+                            .map(Some),
                             Err(error) => Err(error),
                         },
                         None => Ok(None),
@@ -347,18 +412,7 @@ fn run_window(
                 };
 
                 match refreshed {
-                    Ok(Some(paintable)) => {
-                        present_paintable(
-                            &picture,
-                            &status_label,
-                            &ui_state,
-                            &window,
-                            &window_base_title,
-                            &paintable,
-                            paintable.intrinsic_width().max(0) as u32,
-                            paintable.intrinsic_height().max(0) as u32,
-                        );
-                    }
+                    Ok(Some(())) => {}
                     Ok(None) => {
                         if latest_status.is_none() {
                             latest_status = Some(
@@ -462,6 +516,52 @@ struct DmabufPresentation {
 }
 
 #[cfg(unix)]
+#[derive(Copy, Clone, Debug)]
+struct DmabufViewTransform {
+    rotation_quarters: u8,
+    extra_vertical_flip: bool,
+}
+
+#[cfg(unix)]
+impl Default for DmabufViewTransform {
+    fn default() -> Self {
+        // Start with a rotated + flipped-friendly orientation for the current
+        // Linux/GTK DMABUF path; the runtime shortcuts can still override it.
+        Self {
+            rotation_quarters: 0,
+            extra_vertical_flip: true,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl DmabufViewTransform {
+    fn rotate_clockwise(&mut self) {
+        self.rotation_quarters = (self.rotation_quarters + 1) % 4;
+    }
+
+    fn toggle_vertical_flip(&mut self) {
+        self.extra_vertical_flip = !self.extra_vertical_flip;
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn describe(self) -> String {
+        format!(
+            "DMABUF transform: rotate={} extra-flip-y={}",
+            self.rotation_quarters * 90,
+            if self.extra_vertical_flip {
+                "on"
+            } else {
+                "off"
+            }
+        )
+    }
+}
+
+#[cfg(unix)]
 impl DmabufPresentation {
     fn new(display: &gdk::Display, scanout: DmabufFrame) -> Result<Self> {
         let texture = build_dmabuf_texture(
@@ -513,8 +613,9 @@ impl DmabufPresentation {
         Ok(())
     }
 
-    fn to_paintable(&self) -> Result<gdk::Paintable> {
-        if self.y0_top {
+    fn to_paintable(&self, transform: DmabufViewTransform) -> Result<gdk::Paintable> {
+        let needs_vertical_flip = !self.y0_top ^ transform.extra_vertical_flip;
+        if !needs_vertical_flip && transform.rotation_quarters == 0 {
             return Ok(self.texture.clone().upcast());
         }
 
@@ -522,8 +623,32 @@ impl DmabufPresentation {
         let bounds = gtk::graphene::Rect::new(0.0, 0.0, self.width as f32, self.height as f32);
 
         snapshot.save();
-        snapshot.translate(&gtk::graphene::Point::new(0.0, self.height as f32));
-        snapshot.scale(1.0, -1.0);
+
+        match transform.rotation_quarters % 4 {
+            0 => {}
+            1 => {
+                snapshot.translate(&gtk::graphene::Point::new(self.height as f32, 0.0));
+                snapshot.rotate(90.0);
+            }
+            2 => {
+                snapshot.translate(&gtk::graphene::Point::new(
+                    self.width as f32,
+                    self.height as f32,
+                ));
+                snapshot.rotate(180.0);
+            }
+            3 => {
+                snapshot.translate(&gtk::graphene::Point::new(0.0, self.width as f32));
+                snapshot.rotate(270.0);
+            }
+            _ => unreachable!(),
+        }
+
+        if needs_vertical_flip {
+            snapshot.translate(&gtk::graphene::Point::new(0.0, self.height as f32));
+            snapshot.scale(1.0, -1.0);
+        }
+
         snapshot.append_texture(&self.texture, &bounds);
         snapshot.restore();
 
@@ -534,6 +659,30 @@ impl DmabufPresentation {
             )))
             .context("failed to build a GTK paintable for the DMABUF texture")
     }
+}
+
+#[cfg(unix)]
+fn present_dmabuf_paintable(
+    picture: &gtk::Picture,
+    status_label: &gtk::Label,
+    ui_state: &Rc<RefCell<UiState>>,
+    window: &gtk::Window,
+    window_base_title: &str,
+    presentation: &DmabufPresentation,
+    transform: DmabufViewTransform,
+) -> Result<()> {
+    let paintable = presentation.to_paintable(transform)?;
+    present_paintable(
+        picture,
+        status_label,
+        ui_state,
+        window,
+        window_base_title,
+        &paintable,
+        paintable.intrinsic_width().max(0) as u32,
+        paintable.intrinsic_height().max(0) as u32,
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
