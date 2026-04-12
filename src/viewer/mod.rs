@@ -1,4 +1,5 @@
 mod audio;
+mod chooser;
 mod chrome;
 mod clipboard;
 mod cursor;
@@ -27,9 +28,13 @@ use qemu_display::{ClipboardSelection, MouseButton, UpdateDMABUF};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use self::mouse::MouseMode;
-use crate::qemu::ConnectTarget;
+use crate::qemu::{ConnectTarget, VmSummary};
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
+pub fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
+    chooser::choose_vm(vms)
+}
 
 /// Start the GTK viewer and the background listener that mirrors the QEMU display stream.
 pub fn connect(

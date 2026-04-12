@@ -29,9 +29,26 @@ async fn main() -> Result<()> {
             print_doctor(&report);
         }
         Command::Connect(args) => {
-            let target =
-                qemu::resolve_connect_target(args.address(), args.vm.as_deref(), args.console)
-                    .await?;
+            let target = if let Some(selector) = args.vm.as_deref() {
+                qemu::resolve_connect_target(args.address(), Some(selector), args.console).await?
+            } else {
+                let discovery = qemu::discover(args.address()).await?;
+
+                match discovery.vms.as_slice() {
+                    [] => qemu::resolve_connect_target(args.address(), None, args.console).await?,
+                    [vm] => {
+                        qemu::resolve_connect_target(args.address(), Some(&vm.uuid), args.console)
+                            .await?
+                    }
+                    _ => {
+                        let Some(vm) = viewer::choose_vm(&discovery.vms)? else {
+                            return Ok(());
+                        };
+                        qemu::resolve_connect_target(args.address(), Some(&vm.uuid), args.console)
+                            .await?
+                    }
+                }
+            };
             print_warnings(&target.warnings);
             viewer::connect(target, args.address(), args.hotkeys.as_deref())?;
         }

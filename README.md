@@ -45,6 +45,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Guest audio playback through the QEMU D-Bus audio interface.
 - Floating fullscreen controls inspired by virt-viewer.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
+- A VM chooser for the multi-VM `connect` flow.
 - Reconnect handling when the listener drops or the VM restarts.
 
 ## 🔧 Typical Workflow
@@ -59,7 +60,7 @@ cargo run -- doctor --vm demo-vm
 cargo run -- connect --vm demo-vm
 
 cargo run -- connect \
-  --address "unix:path=<path_to_sock> \
+  --address "unix:path=<path_to_sock>" \
   --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"
 
 cargo run -- --verbose connect \
@@ -94,6 +95,7 @@ Each release includes:
 | `viewer/mod.rs` | Orchestrates the GTK4 viewer window, event loop, and presentation updates. |
 | `viewer/audio.rs` | Registers QEMU audio listeners and forwards guest playback to host audio backends. |
 | `viewer/chrome.rs` | Builds the titlebar, fullscreen controls, shortcuts dialog, and about dialog. |
+| `viewer/chooser.rs` | Shows the VM selection window when `connect` sees more than one possible target. |
 | `viewer/clipboard.rs` | Bridges GTK clipboard state and the QEMU clipboard protocol in both directions. |
 | `viewer/cursor.rs` | Tracks guest cursor shape and visibility and applies them to the viewer. |
 | `viewer/dmabuf.rs` | Imports, transforms, and presents DMABUF scanouts for accelerated rendering. |
