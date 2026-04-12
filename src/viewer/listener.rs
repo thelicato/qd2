@@ -93,10 +93,7 @@ async fn listener_main(
         }
     ));
 
-    let title = format!(
-        "QD2 - {} - Console {} ({})",
-        target.vm_name, target.console_id, target.console_label
-    );
+    let title = format!("{} - QD2", target.vm_name);
     let keyboard_available = target
         .console_interfaces
         .iter()
