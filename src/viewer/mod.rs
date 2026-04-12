@@ -1,4 +1,5 @@
 mod chrome;
+mod cursor;
 mod dmabuf;
 mod framebuffer;
 mod keyboard;
@@ -236,6 +237,7 @@ fn run_window(
     picture.add_controller(viewer_shortcuts);
 
     let ui_state = Rc::new(RefCell::new(UiState::default()));
+    let cursor_state = Rc::new(RefCell::new(cursor::CursorState::default()));
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
     if ready.keyboard_available {
         keyboard::install_keyboard_controller(&picture, input_tx.clone());
@@ -307,6 +309,7 @@ fn run_window(
         let display = display.clone();
         let picture = picture.clone();
         let status_label = status_label.clone();
+        let cursor_state = cursor_state.clone();
         let ui_state = ui_state.clone();
         let mouse_mode = mouse_mode.clone();
         let window = window.clone();
@@ -317,6 +320,8 @@ fn run_window(
             let mut latest_presentation = None;
             #[cfg(unix)]
             let mut dmabuf_updates = Vec::new();
+            let mut latest_cursor_shape = None;
+            let mut latest_cursor_visible = None;
             let mut latest_status = None;
             let mut disconnected = false;
 
@@ -336,6 +341,10 @@ fn run_window(
                     }
                     #[cfg(unix)]
                     Ok(ViewerEvent::DmabufUpdate(update)) => dmabuf_updates.push(update),
+                    Ok(ViewerEvent::CursorShapeChanged(shape)) => latest_cursor_shape = Some(shape),
+                    Ok(ViewerEvent::CursorVisibilityChanged(visible)) => {
+                        latest_cursor_visible = Some(visible)
+                    }
                     Ok(ViewerEvent::MouseModeChanged(mode)) => {
                         *mouse_mode.borrow_mut() = mode;
                         ui_state.borrow_mut().last_pointer_guest_position = None;
@@ -348,6 +357,18 @@ fn run_window(
                         break;
                     }
                 }
+            }
+
+            let cursor_dirty = latest_cursor_shape.is_some() || latest_cursor_visible.is_some();
+            if cursor_dirty {
+                let mut cursor_state = cursor_state.borrow_mut();
+                if let Some(shape) = latest_cursor_shape {
+                    cursor_state.set_shape(shape);
+                }
+                if let Some(visible) = latest_cursor_visible {
+                    cursor_state.set_visible(visible);
+                }
+                cursor_state.apply_to_widget(&picture);
             }
 
             if let Some(presentation) = latest_presentation {
@@ -529,6 +550,8 @@ enum ViewerEvent {
     Dmabuf(dmabuf::DmabufFrame),
     #[cfg(unix)]
     DmabufUpdate(UpdateDMABUF),
+    CursorShapeChanged(Option<cursor::GuestCursor>),
+    CursorVisibilityChanged(bool),
     MouseModeChanged(MouseMode),
     Status(String),
     Disconnected,

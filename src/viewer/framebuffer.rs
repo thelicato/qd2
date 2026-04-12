@@ -5,7 +5,7 @@ use qemu_display::{Scanout, Update};
 #[cfg(unix)]
 use qemu_display::{ScanoutDMABUF, ScanoutMap, ScanoutMmap, UpdateDMABUF, UpdateMap};
 
-use super::{ViewerEvent, dmabuf::DmabufFrame};
+use super::{ViewerEvent, cursor::GuestCursor, dmabuf::DmabufFrame};
 
 const PIXMAN_A8B8G8R8: u32 = pixman_sys::pixman_format_code_t_PIXMAN_a8b8g8r8;
 const PIXMAN_A8R8G8B8: u32 = pixman_sys::pixman_format_code_t_PIXMAN_a8r8g8b8;
@@ -449,9 +449,23 @@ impl FrameStreamHandler {
         self.send_status("The guest display was disabled.");
     }
 
-    pub(super) fn mouse_set(&mut self, _set: qemu_display::MouseSet) {}
+    pub(super) fn mouse_set(&mut self, set: qemu_display::MouseSet) {
+        // The host cursor already tracks the local pointer position, so the
+        // useful part of MouseSet for this viewer is whether the guest wants
+        // the cursor visible at all.
+        let _ = self
+            .event_tx
+            .send(ViewerEvent::CursorVisibilityChanged(set.on != 0));
+    }
 
-    pub(super) fn cursor_define(&mut self, _cursor: qemu_display::Cursor) {}
+    pub(super) fn cursor_define(&mut self, cursor: qemu_display::Cursor) {
+        match GuestCursor::from_qemu(cursor) {
+            Ok(shape) => {
+                let _ = self.event_tx.send(ViewerEvent::CursorShapeChanged(shape));
+            }
+            Err(error) => self.send_status(format!("Could not decode guest cursor: {error:#}")),
+        }
+    }
 
     pub(super) fn disconnected(&mut self) {
         let _ = self.event_tx.send(ViewerEvent::Disconnected);
