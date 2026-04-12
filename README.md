@@ -9,7 +9,7 @@ The current implementation covers discovery, inspection, and a graphical viewer:
 - `qd2 list` enumerates visible QEMU D-Bus VMs on the session bus and common libvirt private D-Bus socket directories.
 - `qd2 inspect` shows VM metadata, console details, and exported helper interfaces.
 - `qd2 connect` opens a GTK4 window for one console and renders both framebuffer and DMABUF scanouts when available.
-- `qd2 connect` forwards keyboard and mouse input, tracks guest cursor shape updates, and syncs clipboard content.
+- `qd2 connect` forwards keyboard and mouse input, tracks guest cursor shape updates, syncs clipboard content, and plays guest audio when the QEMU audio interface is available.
 - `qd2 connect --hotkeys ...` overrides viewer shortcuts such as fullscreen toggling and input release.
 - `--address <DBUS_ADDRESS>` connects to a custom D-Bus bus instead of the session bus.
 

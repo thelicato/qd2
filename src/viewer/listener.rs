@@ -22,7 +22,7 @@ use std::os::fd::{AsFd, IntoRawFd};
 use crate::qemu::{self, ConnectTarget};
 
 use super::{
-    InputEvent, ViewerEvent, ViewerReady, clipboard,
+    InputEvent, ViewerEvent, ViewerReady, audio, clipboard,
     framebuffer::FrameStreamHandler,
     mouse::{self, MouseMode},
 };
@@ -73,6 +73,14 @@ async fn listener_main(
         clipboard::register_clipboard_bridge(&connection, &target.owner, event_tx.clone())
             .await
             .context("failed to initialize clipboard sharing")?;
+    let _audio =
+        match audio::register_audio_output(&connection, &target.owner, &target.vm_name).await {
+            Ok(audio) => audio,
+            Err(error) => {
+                eprintln!("QD2 audio error: {error:#}");
+                None
+            }
+        };
     clipboard::debug(format!(
         "listener clipboard availability: {}",
         if clipboard.is_some() {

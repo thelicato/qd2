@@ -1,3 +1,4 @@
+mod audio;
 mod chrome;
 mod clipboard;
 mod cursor;
