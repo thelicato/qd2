@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
                 qemu::resolve_connect_target(args.address(), args.vm.as_deref(), args.console)
                     .await?;
             print_warnings(&target.warnings);
-            viewer::connect(target, args.hotkeys.as_deref())?;
+            viewer::connect(target, args.address(), args.hotkeys.as_deref())?;
         }
     }
 

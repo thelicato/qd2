@@ -32,7 +32,11 @@ use crate::qemu::ConnectTarget;
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Start the GTK viewer and the background listener that mirrors the QEMU display stream.
-pub fn connect(target: ConnectTarget, hotkeys_spec: Option<&str>) -> Result<()> {
+pub fn connect(
+    target: ConnectTarget,
+    requested_address: Option<&str>,
+    hotkeys_spec: Option<&str>,
+) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
     let (event_tx, event_rx) = std_mpsc::channel();
@@ -44,7 +48,17 @@ pub fn connect(target: ConnectTarget, hotkeys_spec: Option<&str>) -> Result<()> 
         .name("qd2-display-listener".to_owned())
         .spawn({
             let target = target.clone();
-            move || listener::run_listener_thread(target, event_tx, ready_tx, input_rx, shutdown_rx)
+            let requested_address = requested_address.map(str::to_owned);
+            move || {
+                listener::run_listener_thread(
+                    target,
+                    requested_address,
+                    event_tx,
+                    ready_tx,
+                    input_rx,
+                    shutdown_rx,
+                )
+            }
         })
         .context("failed to spawn the QEMU display listener thread")?;
 
@@ -400,6 +414,7 @@ fn run_window(
         let clipboard_state = clipboard_state.clone();
         let input_grab = input_grab.clone();
         let ui_state = ui_state.clone();
+        let keyboard_controller = keyboard_controller.clone();
         let mouse_mode = mouse_mode.clone();
         let window = window.clone();
         let window_base_title = window_base_title.clone();
@@ -598,8 +613,18 @@ fn run_window(
             }
 
             if disconnected {
-                window.close();
-                return glib::ControlFlow::Break;
+                if let Some(keyboard_controller) = keyboard_controller.as_ref() {
+                    keyboard_controller.force_release();
+                }
+                *mouse_mode.borrow_mut() = MouseMode::Disabled;
+                if grab::release(&window, &input_grab) {
+                    ui_state.borrow_mut().last_pointer_guest_position = None;
+                    grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+                }
+                if latest_status.is_none() {
+                    latest_status =
+                        Some("Connection to the VM was lost. Waiting to reconnect...".to_owned());
+                }
             }
 
             if let Some(message) = latest_status {

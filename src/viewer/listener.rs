@@ -31,9 +31,63 @@ use super::{
 
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
 const DISCONNECT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const RECONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Debug)]
+struct ReconnectPlan {
+    requested_address: Option<String>,
+    vm_name: String,
+    vm_uuid: String,
+    console_id: u32,
+}
+
+impl ReconnectPlan {
+    fn new(target: &ConnectTarget, requested_address: Option<String>) -> Self {
+        Self {
+            requested_address,
+            vm_name: target.vm_name.clone(),
+            vm_uuid: target.vm_uuid.clone(),
+            console_id: target.console_id,
+        }
+    }
+
+    fn waiting_message(&self) -> String {
+        match &self.requested_address {
+            Some(address) => format!(
+                "Connection to `{}` was lost. Trying to reconnect on `{address}`.\nIf the VM restarted on a new private D-Bus socket, rerun QD2 without `--address` or pass the new address.",
+                self.vm_name
+            ),
+            None => format!(
+                "Connection to `{}` was lost. Waiting for the VM to come back...",
+                self.vm_name
+            ),
+        }
+    }
+
+    fn error_message(&self, error: &anyhow::Error) -> String {
+        let retry_hint = match &self.requested_address {
+            Some(_) => {
+                "QD2 will keep retrying the same explicit address until the VM returns there."
+            }
+            None => "QD2 will keep auto-discovering the VM by UUID while it restarts.",
+        };
+
+        format!(
+            "{}\nLast reconnect error: {error:#}\n{retry_hint}",
+            self.waiting_message()
+        )
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SessionOutcome {
+    Shutdown,
+    Disconnected,
+}
 
 pub(super) fn run_listener_thread(
-    target: ConnectTarget,
+    initial_target: ConnectTarget,
+    requested_address: Option<String>,
     event_tx: Sender<ViewerEvent>,
     ready_tx: SyncSender<Result<ViewerReady>>,
     input_rx: tokio_mpsc::UnboundedReceiver<InputEvent>,
@@ -42,8 +96,9 @@ pub(super) fn run_listener_thread(
     let result = tokio::runtime::Runtime::new()
         .context("failed to create the async runtime for the display listener")
         .and_then(|runtime| {
-            runtime.block_on(listener_main(
-                target,
+            runtime.block_on(listener_supervisor_main(
+                initial_target,
+                requested_address,
                 event_tx,
                 ready_tx,
                 input_rx,
@@ -56,13 +111,93 @@ pub(super) fn run_listener_thread(
     }
 }
 
-async fn listener_main(
-    target: ConnectTarget,
+async fn listener_supervisor_main(
+    initial_target: ConnectTarget,
+    requested_address: Option<String>,
     event_tx: Sender<ViewerEvent>,
     ready_tx: SyncSender<Result<ViewerReady>>,
     mut input_rx: tokio_mpsc::UnboundedReceiver<InputEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
+    let reconnect_plan = ReconnectPlan::new(&initial_target, requested_address);
+    let mut last_status = None::<String>;
+
+    match listener_session(
+        initial_target,
+        &event_tx,
+        Some(&ready_tx),
+        &mut input_rx,
+        &mut shutdown_rx,
+    )
+    .await
+    {
+        Ok(SessionOutcome::Shutdown) => return Ok(()),
+        Ok(SessionOutcome::Disconnected) => {
+            send_status_if_changed(
+                &event_tx,
+                &mut last_status,
+                reconnect_plan.waiting_message(),
+            );
+        }
+        Err(error) => {
+            let _ = ready_tx.send(Err(error));
+            return Ok(());
+        }
+    }
+
+    loop {
+        if wait_for_reconnect_retry(&mut input_rx, &mut shutdown_rx).await {
+            return Ok(());
+        }
+
+        match qemu::resolve_connect_target(
+            reconnect_plan.requested_address.as_deref(),
+            Some(&reconnect_plan.vm_uuid),
+            Some(reconnect_plan.console_id),
+        )
+        .await
+        {
+            Ok(target) => {
+                match listener_session(target, &event_tx, None, &mut input_rx, &mut shutdown_rx)
+                    .await
+                {
+                    Ok(SessionOutcome::Shutdown) => return Ok(()),
+                    Ok(SessionOutcome::Disconnected) => {
+                        last_status = None;
+                        send_status_if_changed(
+                            &event_tx,
+                            &mut last_status,
+                            reconnect_plan.waiting_message(),
+                        );
+                    }
+                    Err(error) => {
+                        last_status = None;
+                        send_status_if_changed(
+                            &event_tx,
+                            &mut last_status,
+                            reconnect_plan.error_message(&error),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                send_status_if_changed(
+                    &event_tx,
+                    &mut last_status,
+                    reconnect_plan.error_message(&error),
+                );
+            }
+        }
+    }
+}
+
+async fn listener_session(
+    target: ConnectTarget,
+    event_tx: &Sender<ViewerEvent>,
+    ready_tx: Option<&SyncSender<Result<ViewerReady>>>,
+    input_rx: &mut tokio_mpsc::UnboundedReceiver<InputEvent>,
+    shutdown_rx: &mut oneshot::Receiver<()>,
+) -> Result<SessionOutcome> {
     let connection = qemu::connect(target.source_address.as_deref()).await?;
     let mut console = RemoteConsole::new(&connection, &target.owner, target.console_id)
         .await
@@ -117,18 +252,30 @@ async fn listener_main(
     };
     let mut disconnect_probe = tokio::time::interval(DISCONNECT_POLL_INTERVAL);
 
-    let _ = ready_tx.send(Ok(ViewerReady {
+    let ready = ViewerReady {
         title,
         width: target.width,
         height: target.height,
         keyboard_available,
         clipboard_available: clipboard.is_some(),
         mouse_mode,
-    }));
+    };
+    match ready_tx {
+        Some(ready_tx) => {
+            let _ = ready_tx.send(Ok(ready));
+        }
+        None => {
+            let _ = event_tx.send(ViewerEvent::MouseModeChanged(mouse_mode));
+            let _ = event_tx.send(ViewerEvent::Status(format!(
+                "Reconnected to `{}`. Waiting for the guest display...",
+                target.vm_name
+            )));
+        }
+    }
 
     loop {
         tokio::select! {
-            _ = &mut shutdown_rx => break,
+            _ = &mut *shutdown_rx => return Ok(SessionOutcome::Shutdown),
             _ = disconnect_probe.tick() => {
                 if console.check_alive().await.is_err() {
                     break;
@@ -196,14 +343,47 @@ async fn listener_main(
                         }
                     }
                 }
-                None => break,
+                None => return Ok(SessionOutcome::Shutdown),
             }
         }
     }
 
     drop(console);
     drop(connection);
-    Ok(())
+    Ok(SessionOutcome::Disconnected)
+}
+
+async fn wait_for_reconnect_retry(
+    input_rx: &mut tokio_mpsc::UnboundedReceiver<InputEvent>,
+    shutdown_rx: &mut oneshot::Receiver<()>,
+) -> bool {
+    let sleep = tokio::time::sleep(RECONNECT_RETRY_INTERVAL);
+    tokio::pin!(sleep);
+
+    loop {
+        tokio::select! {
+            _ = &mut *shutdown_rx => return true,
+            maybe_input = input_rx.recv() => {
+                if maybe_input.is_none() {
+                    return true;
+                }
+            }
+            _ = &mut sleep => return false,
+        }
+    }
+}
+
+fn send_status_if_changed(
+    event_tx: &Sender<ViewerEvent>,
+    last_status: &mut Option<String>,
+    message: String,
+) {
+    if last_status.as_deref() == Some(message.as_str()) {
+        return;
+    }
+
+    *last_status = Some(message.clone());
+    let _ = event_tx.send(ViewerEvent::Status(message));
 }
 
 struct RemoteConsole {
@@ -649,5 +829,48 @@ impl LocalConsoleListenerDmabuf2 {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReconnectPlan;
+    use crate::qemu::ConnectTarget;
+
+    fn connect_target() -> ConnectTarget {
+        ConnectTarget {
+            source_address: Some("unix:path=/run/libvirt/qemu/dbus/7-demo-dbus.sock".to_owned()),
+            owner: ":1.42".to_owned(),
+            vm_name: "demo".to_owned(),
+            vm_uuid: "11111111-2222-3333-4444-555555555555".to_owned(),
+            console_id: 0,
+            width: 1280,
+            height: 720,
+            console_interfaces: vec!["org.qemu.Display1.Mouse".to_owned()],
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reconnect_wait_message_mentions_new_socket_hint_for_explicit_addresses() {
+        let plan = ReconnectPlan::new(
+            &connect_target(),
+            Some("unix:path=/run/libvirt/qemu/dbus/7-demo-dbus.sock".to_owned()),
+        );
+
+        let message = plan.waiting_message();
+        assert!(message.contains("demo"));
+        assert!(message.contains("--address"));
+        assert!(message.contains("new private D-Bus socket"));
+    }
+
+    #[test]
+    fn reconnect_wait_message_mentions_vm_return_for_auto_discovery() {
+        let plan = ReconnectPlan::new(&connect_target(), None);
+
+        let message = plan.waiting_message();
+        assert!(message.contains("demo"));
+        assert!(message.contains("Waiting for the VM to come back"));
+        assert!(!message.contains("--address"));
     }
 }
