@@ -122,18 +122,21 @@ async fn listener_main(
             _ = &mut shutdown_rx => break,
             maybe_input = input_rx.recv() => match maybe_input {
                 Some(input) => {
-                    if let InputEvent::ClipboardHostChanged(text) = &input {
+                    if let InputEvent::ClipboardHostChanged(selection, content) = &input {
                         clipboard::debug(format!(
-                            "listener received ClipboardHostChanged: {}",
-                            match text {
-                                Some(text) => format!("len={}", text.len()),
-                                None => "empty".to_owned(),
-                            }
+                            "listener received ClipboardHostChanged selection={selection:?}: {}",
+                            content
+                                .as_ref()
+                                .map(|content| content.describe())
+                                .unwrap_or_else(|| "empty".to_owned())
                         ));
                         if let Some(clipboard) = &clipboard {
-                            if let Err(error) = clipboard.update_host_text(text.clone()).await {
+                            if let Err(error) = clipboard
+                                .update_host_content(*selection, content.clone())
+                                .await
+                            {
                                 super::clipboard::debug(format!(
-                                    "update_host_text failed: {error:#}"
+                                    "update_host_content failed: {error:#}"
                                 ));
                                 let _ = event_tx.send(ViewerEvent::Status(format!(
                                     "Clipboard sharing failed: {error:#}"
@@ -246,7 +249,7 @@ impl RemoteConsole {
                 .release(keycode)
                 .await
                 .with_context(|| format!("failed to send key release for qnum {keycode}")),
-            InputEvent::ClipboardHostChanged(_) => Ok(()),
+            InputEvent::ClipboardHostChanged(_, _) => Ok(()),
             InputEvent::MousePress(button) => self
                 .mouse
                 .press(button)

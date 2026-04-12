@@ -20,7 +20,7 @@ use std::{
 use anyhow::{Context, Result};
 use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
-use qemu_display::{MouseButton, UpdateDMABUF};
+use qemu_display::{ClipboardSelection, MouseButton, UpdateDMABUF};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use self::mouse::MouseMode;
@@ -332,6 +332,7 @@ fn run_window(
             #[cfg(unix)]
             let mut dmabuf_updates = Vec::new();
             let mut latest_guest_clipboard = None;
+            let mut latest_guest_primary = None;
             let mut latest_cursor_shape = None;
             let mut latest_cursor_visible = None;
             let mut latest_status = None;
@@ -357,9 +358,11 @@ fn run_window(
                     Ok(ViewerEvent::CursorVisibilityChanged(visible)) => {
                         latest_cursor_visible = Some(visible)
                     }
-                    Ok(ViewerEvent::ClipboardGuestText(text)) => {
-                        latest_guest_clipboard = Some(text)
-                    }
+                    Ok(ViewerEvent::ClipboardGuestChanged(selection, content)) => match selection {
+                        ClipboardSelection::Clipboard => latest_guest_clipboard = Some(content),
+                        ClipboardSelection::Primary => latest_guest_primary = Some(content),
+                        ClipboardSelection::Secondary => {}
+                    },
                     Ok(ViewerEvent::MouseModeChanged(mode)) => {
                         *mouse_mode.borrow_mut() = mode;
                         ui_state.borrow_mut().last_pointer_guest_position = None;
@@ -386,10 +389,24 @@ fn run_window(
                 cursor_state.apply_to_widget(&picture);
             }
 
-            if let Some(text) = latest_guest_clipboard {
-                if let Err(error) =
-                    clipboard::apply_guest_text_clipboard(&picture, &clipboard_state, &text)
-                {
+            if let Some(content) = latest_guest_clipboard {
+                if let Err(error) = clipboard::apply_guest_clipboard(
+                    &picture,
+                    &clipboard_state,
+                    ClipboardSelection::Clipboard,
+                    &content,
+                ) {
+                    latest_status = Some(format!("Clipboard sync failed: {error:#}"));
+                }
+            }
+
+            if let Some(content) = latest_guest_primary {
+                if let Err(error) = clipboard::apply_guest_clipboard(
+                    &picture,
+                    &clipboard_state,
+                    ClipboardSelection::Primary,
+                    &content,
+                ) {
                     latest_status = Some(format!("Clipboard sync failed: {error:#}"));
                 }
             }
@@ -574,7 +591,7 @@ enum ViewerEvent {
     Dmabuf(dmabuf::DmabufFrame),
     #[cfg(unix)]
     DmabufUpdate(UpdateDMABUF),
-    ClipboardGuestText(String),
+    ClipboardGuestChanged(ClipboardSelection, clipboard::ClipboardContent),
     CursorShapeChanged(Option<cursor::GuestCursor>),
     CursorVisibilityChanged(bool),
     MouseModeChanged(MouseMode),
@@ -586,7 +603,7 @@ enum ViewerEvent {
 enum InputEvent {
     KeyPress(u32),
     KeyRelease(u32),
-    ClipboardHostChanged(Option<String>),
+    ClipboardHostChanged(ClipboardSelection, Option<clipboard::ClipboardContent>),
     MousePress(MouseButton),
     MouseRelease(MouseButton),
     MouseAbs { x: u32, y: u32 },
