@@ -64,11 +64,12 @@ Building from source currently requires:
 - GTK4 development files
 - pixman development files
 - libusbredirparser development files
+- libusbredirhost development files
 - `pkg-config` or `pkgconf`
 
 Typical package names:
 
-- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `libusbredirparser-dev`, `pkg-config`
+- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `libusbredirparser-dev`, `libusbredirhost-dev`, `pkg-config`
 
 Build from source with:
 

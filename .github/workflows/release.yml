@@ -37,7 +37,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libpixman-1-dev libusbredirparser-dev pkg-config dpkg-dev desktop-file-utils
+          sudo apt-get install -y libgtk-4-dev libpixman-1-dev libusbredirparser-dev libusbredirhost-dev pkg-config dpkg-dev desktop-file-utils
 
       - name: Validate desktop launcher
         if: runner.os == 'Linux'
