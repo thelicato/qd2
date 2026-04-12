@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=QD2
+GenericName=QEMU D-Bus Display Viewer
+Comment=Connect to QEMU virtual machines exposed through D-Bus
+Exec=qd2 connect
+Icon=qd2
+Terminal=false
+Categories=System;Utility;
+Keywords=QEMU;KVM;Virtual Machine;DBus;Viewer;
+StartupNotify=true

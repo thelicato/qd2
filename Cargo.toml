@@ -2,6 +2,11 @@
 name = "qd2"
 version = "0.1.0"
 edition = "2024"
+description = "QEMU D-Bus Display viewer and diagnostics tool"
+license = "GPL-3.0-only"
+readme = "README.md"
+repository = "https://github.com/thelicato/qd2"
+homepage = "https://github.com/thelicato/qd2"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -13,3 +18,33 @@ qemu-display = "0.2.1"
 serde_bytes = "0.11.19"
 tokio = { version = "1.51.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 zbus = "5.14.0"
+
+[package.metadata.deb]
+maintainer = "QD2 maintainers"
+copyright = "2026 QD2 contributors"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+QD2 is a Rust and GTK4 client for QEMU's D-Bus display stack. It can discover
+VMs, inspect exported objects, diagnose common setup issues, and open an
+interactive viewer with display, input, clipboard, audio, and reconnect
+support."""
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/qd2", "usr/bin/", "755"],
+    ["packaging/linux/qd2.desktop", "usr/share/applications/qd2.desktop", "644"],
+    ["logo.png", "usr/share/icons/hicolor/512x512/apps/qd2.png", "644"],
+    ["README.md", "usr/share/doc/qd2/README.md", "644"],
+    ["LICENSE", "usr/share/doc/qd2/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+auto-req = "builtin"
+assets = [
+    { source = "target/release/qd2", dest = "/usr/bin/qd2", mode = "0755" },
+    { source = "packaging/linux/qd2.desktop", dest = "/usr/share/applications/qd2.desktop", mode = "0644" },
+    { source = "logo.png", dest = "/usr/share/icons/hicolor/512x512/apps/qd2.png", mode = "0644" },
+    { source = "README.md", dest = "/usr/share/doc/qd2/README.md", mode = "0644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/qd2/LICENSE", mode = "0644", doc = true },
+]

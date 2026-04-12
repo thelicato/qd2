@@ -43,13 +43,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libpixman-1-dev pkg-config
+          sudo apt-get install -y libgtk-4-dev libpixman-1-dev pkg-config dpkg-dev desktop-file-utils
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: |
           brew update
           brew install gtk4 pixman pkgconf
+
+      - name: Validate desktop launcher
+        if: runner.os == 'Linux'
+        run: desktop-file-validate packaging/linux/qd2.desktop
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -60,6 +64,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: cargo install --locked cargo-deb cargo-generate-rpm
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -78,11 +86,24 @@ jobs:
 
           tar -C dist -czf "dist/${package_dir}.tar.gz" "${package_dir}"
 
+      - name: Package Linux installers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          cargo deb --no-build --target "${{ matrix.target }}" --output "dist/${BINARY_NAME}_${version}_${{ matrix.asset_suffix }}.deb"
+          cargo generate-rpm --target "${{ matrix.target }}" -o "dist/${BINARY_NAME}-${version}-${{ matrix.asset_suffix }}.rpm"
+
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
 
   release:
     name: Publish release
@@ -109,8 +130,9 @@ jobs:
 
       - name: Generate checksums
         run: |
-          cd dist
-          sha256sum *.tar.gz > SHA256SUMS.txt
+          find dist -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > dist/SHA256SUMS.txt
 
       - name: Create GitHub release shell
         env:

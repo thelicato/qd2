@@ -56,6 +56,8 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 
 You can either download a prebuilt binary from the [GitHub Releases](https://github.com/thelicato/qd2/releases) page or build QD2 from source.
 
+Linux releases also ship native `.deb` and `.rpm` packages. Those packages install the `qd2` binary, the application icon, and a desktop launcher that starts `qd2 connect`.
+
 Building from source currently requires:
 
 - Rust stable with Cargo
@@ -72,6 +74,13 @@ Build from source with:
 
 ```bash
 cargo build --release
+```
+
+Install packaged Linux builds with your system package manager:
+
+```bash
+sudo dpkg -i qd2_*.deb
+sudo rpm -i qd2-*.rpm
 ```
 
 ## ⚙️ Runtime Requirements
@@ -115,6 +124,7 @@ Prebuilt binaries are published on the [GitHub Releases](https://github.com/thel
 Each release includes:
 
 - packaged binaries for Linux and macOS on both `x86_64` and `arm64`
+- Linux `.deb` and `.rpm` packages with the desktop launcher and icon included
 - release notes generated with `npx changelogithub`
 - a `SHA256SUMS.txt` file for checksum verification
 
