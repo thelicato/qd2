@@ -37,7 +37,28 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libpixman-1-dev libusbredirparser-dev libusbredirhost-dev pkg-config dpkg-dev desktop-file-utils
+          sudo apt-get install -y libgtk-4-dev libpixman-1-dev libusb-1.0-0-dev pkg-config dpkg-dev desktop-file-utils meson ninja-build
+
+      - name: Install usbredir for qemu-display
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --branch usbredir-0.13.0 --depth 1 https://gitlab.freedesktop.org/spice/usbredir.git /tmp/usbredir
+          meson setup /tmp/usbredir/build /tmp/usbredir --prefix=/usr/local
+          meson compile -C /tmp/usbredir/build
+          sudo meson install -C /tmp/usbredir/build
+          sudo ldconfig
+
+          multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+          {
+            echo "PKG_CONFIG_PATH=/usr/local/lib/${multiarch}/pkgconfig:/usr/local/lib/pkgconfig"
+            echo "LD_LIBRARY_PATH=/usr/local/lib/${multiarch}:/usr/local/lib"
+          } >> "$GITHUB_ENV"
+
+          pkg-config --modversion libusbredirhost
+          pkg-config --modversion libusbredirparser-0.5
 
       - name: Validate desktop launcher
         if: runner.os == 'Linux'

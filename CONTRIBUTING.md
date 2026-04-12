@@ -17,13 +17,14 @@ QD2 currently builds from source with:
 - Rust stable with Cargo
 - GTK4 development files
 - pixman development files
-- libusbredirparser development files
-- libusbredirhost development files
+- usbredir 0.13+ libraries visible to `pkg-config` (`libusbredirhost.pc` and `libusbredirparser-0.5.pc`)
 - `pkg-config` or `pkgconf`
 
 Typical package names:
 
-- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `libusbredirparser-dev`, `libusbredirhost-dev`, `pkg-config`
+- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `libusb-1.0-0-dev`, `pkg-config`, `meson`, `ninja-build`
+
+If your distro packages do not provide the `usbredir` pkg-config files expected by `qemu-display`, install `usbredir` 0.13+ from source first.
 
 Useful commands:
 
