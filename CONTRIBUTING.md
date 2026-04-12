@@ -22,7 +22,6 @@ QD2 currently builds from source with:
 Typical package names:
 
 - Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `pkg-config`
-- macOS with Homebrew: `gtk4`, `pixman`, `pkgconf`
 
 Useful commands:
 

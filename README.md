@@ -68,7 +68,6 @@ Building from source currently requires:
 Typical package names:
 
 - Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `pkg-config`
-- macOS with Homebrew: `gtk4`, `pixman`, `pkgconf`
 
 Build from source with:
 
@@ -103,16 +102,15 @@ Some features have extra requirements:
 
 ## 🌍 Platform Notes
 
-- Release artifacts are produced for Linux and macOS on both `x86_64` and `arm64`.
-- `qd2 connect` currently targets Unix-style environments.
+- Release artifacts are produced for Linux on both `x86_64` and `arm64`.
+- `qd2 connect` currently targets Linux environments.
 - DMABUF import is currently available on Linux GTK builds.
 - Some host integrations, especially Wayland, PipeWire, and private libvirt sockets, depend on the runtime session and permissions you launch QD2 with.
 
 ## ⚠️ Known Limitations
 
-- Linux is the most exercised platform today; macOS builds are produced, but are less battle-tested.
-- The viewer is currently Unix-oriented and does not target Windows.
-- DMABUF acceleration is Linux-only; other platforms fall back to software framebuffer updates.
+- The viewer is Linux-only.
+- DMABUF acceleration depends on the host Linux GTK stack and render node support.
 - Running QD2 under `sudo` can break desktop integrations like audio or clipboard unless the relevant user-session environment is preserved.
 - Some guest features depend on the VM configuration, not just QD2 itself; clipboard and audio both require the right QEMU-side wiring.
 - Support is focused on a single interactive viewer window per `connect` session rather than advanced management features like USB redirection or file transfer.
@@ -123,7 +121,7 @@ Prebuilt binaries are published on the [GitHub Releases](https://github.com/thel
 
 Each release includes:
 
-- packaged binaries for Linux and macOS on both `x86_64` and `arm64`
+- packaged binaries for Linux on both `x86_64` and `arm64`
 - Linux `.deb` and `.rpm` packages with the desktop launcher and icon included
 - release notes generated with `npx changelogithub`
 - a `SHA256SUMS.txt` file for checksum verification

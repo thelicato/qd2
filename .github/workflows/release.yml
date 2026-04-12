@@ -26,12 +26,6 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_suffix: linux-arm64
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            asset_suffix: macos-x86_64
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            asset_suffix: macos-arm64
 
     steps:
       - name: Checkout repository
@@ -44,12 +38,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libpixman-1-dev pkg-config dpkg-dev desktop-file-utils
-
-      - name: Install macOS build dependencies
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew install gtk4 pixman pkgconf
 
       - name: Validate desktop launcher
         if: runner.os == 'Linux'
