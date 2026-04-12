@@ -14,6 +14,8 @@ use zbus::{
     zvariant::OwnedObjectPath,
 };
 
+use crate::diagnostics;
+
 const DISPLAY_ROOT_PATH: &str = "/org/qemu/Display1";
 const LIBVIRT_DBUS_DIRS: &[&str] = &["/run/libvirt/qemu/dbus", "/var/run/libvirt/qemu/dbus"];
 
@@ -97,6 +99,13 @@ pub struct ChardevSummary {
     pub echo: bool,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ClipboardAgentStatus {
+    Unknown,
+    GuestDisconnected,
+    Connected,
+}
+
 #[derive(Debug, Clone)]
 struct DiscoveryTarget {
     label: String,
@@ -122,6 +131,10 @@ pub async fn discover(address: Option<&str>) -> Result<Discovery> {
 pub async fn inspect(address: Option<&str>, selector: Option<&str>) -> Result<InspectionReport> {
     let discovery = discover(address).await?;
     let vm = select_vm(&discovery, selector)?;
+    diagnostics::verbose(format!(
+        "inspecting VM `{}` on {}",
+        vm.name, vm.source_label
+    ));
     let connection = connect(vm.source_address.as_deref()).await?;
     let display = Display::new(&connection, Some(vm.owner.clone()))
         .await
@@ -172,7 +185,7 @@ pub async fn inspect(address: Option<&str>, selector: Option<&str>) -> Result<In
             .then(left.owner.cmp(&right.owner))
     });
 
-    Ok(InspectionReport {
+    let mut report = InspectionReport {
         bus_label: vm.source_label.clone(),
         vm,
         has_audio: display.audio().await?.is_some(),
@@ -180,7 +193,12 @@ pub async fn inspect(address: Option<&str>, selector: Option<&str>) -> Result<In
         consoles,
         chardevs,
         warnings: discovery.warnings,
-    })
+    };
+    report
+        .warnings
+        .extend(suggested_inspection_warnings(&report));
+
+    Ok(report)
 }
 
 pub async fn resolve_connect_target(
@@ -243,6 +261,7 @@ async fn auto_discover() -> Result<Discovery> {
 }
 
 async fn discover_target(target: &DiscoveryTarget) -> Result<Vec<VmSummary>> {
+    diagnostics::verbose(format!("discovering QEMU VMs on {}", target.label));
     let connection = connect(target.address.as_deref()).await?;
     let mut vms = discover_vms(&connection, target).await?;
     sort_vms(&mut vms);
@@ -544,6 +563,72 @@ fn format_scan_warnings(warnings: &[String]) -> String {
     }
 }
 
+pub(crate) fn clipboard_agent_status(chardevs: &[ChardevSummary]) -> ClipboardAgentStatus {
+    let clipboard_channels = chardevs
+        .iter()
+        .filter(|chardev| is_clipboard_bridge_chardev(chardev))
+        .collect::<Vec<_>>();
+
+    if clipboard_channels.is_empty() {
+        ClipboardAgentStatus::Unknown
+    } else if clipboard_channels
+        .iter()
+        .any(|chardev| chardev.frontend_open)
+    {
+        ClipboardAgentStatus::Connected
+    } else {
+        ClipboardAgentStatus::GuestDisconnected
+    }
+}
+
+pub(crate) fn suggested_inspection_warnings(report: &InspectionReport) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if !report.has_audio {
+        warnings.push(missing_audio_warning().to_owned());
+    }
+
+    if !report.has_clipboard {
+        warnings.push(missing_clipboard_warning().to_owned());
+    } else {
+        match clipboard_agent_status(&report.chardevs) {
+            ClipboardAgentStatus::Unknown => {}
+            ClipboardAgentStatus::GuestDisconnected => {
+                warnings.push(disconnected_clipboard_agent_warning().to_owned())
+            }
+            ClipboardAgentStatus::Connected => {}
+        }
+    }
+
+    warnings
+}
+
+pub(crate) fn missing_audio_warning() -> &'static str {
+    "QEMU does not expose the D-Bus audio object. QD2 audio needs `-audiodev driver=dbus,id=...`, `-display dbus,...,audiodev=...`, and a sound device wired with `audiodev=...`."
+}
+
+pub(crate) fn missing_clipboard_warning() -> &'static str {
+    "QEMU does not expose the D-Bus clipboard object. Clipboard sharing usually needs a `qemu-vdagent` chardev with `clipboard=on` and a `virtserialport` named `com.redhat.spice.0`."
+}
+
+pub(crate) fn unverifiable_clipboard_agent_note() -> &'static str {
+    "QEMU exposes the D-Bus clipboard object, but no clipboard/vdagent chardev is visible in the exported chardev list. Clipboard can still work in this setup, so QD2 cannot confirm the guest agent state from D-Bus alone."
+}
+
+pub(crate) fn disconnected_clipboard_agent_warning() -> &'static str {
+    "A clipboard/vdagent channel is present, but the guest side is not connected. Make sure the guest vdagent service is running."
+}
+
+fn is_clipboard_bridge_chardev(chardev: &ChardevSummary) -> bool {
+    let name = chardev.name.to_ascii_lowercase();
+    let owner = chardev.owner.to_ascii_lowercase();
+
+    name.contains("vdagent")
+        || owner.contains("vdagent")
+        || owner == "com.redhat.spice.0"
+        || owner.contains("spice")
+}
+
 fn deduplicate_vms(vms: &mut Vec<VmSummary>) {
     let mut seen = BTreeSet::new();
 
@@ -704,5 +789,103 @@ mod tests {
 
         assert_eq!(vms.len(), 1);
         assert_eq!(vms[0].source_label, "session bus");
+    }
+
+    fn sample_report(
+        has_audio: bool,
+        has_clipboard: bool,
+        chardevs: Vec<ChardevSummary>,
+    ) -> InspectionReport {
+        InspectionReport {
+            bus_label: describe_scope(None),
+            vm: sample_vm("demo", "uuid-1", ":1.101"),
+            has_audio,
+            has_clipboard,
+            consoles: vec![ConsoleSummary {
+                id: 0,
+                label: "Demo".to_owned(),
+                head: 0,
+                kind: "display".to_owned(),
+                width: 1280,
+                height: 720,
+                interfaces: vec!["org.qemu.Display1.Mouse".to_owned()],
+            }],
+            chardevs,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn connected_vdagent_channel_is_detected() {
+        let status = clipboard_agent_status(&[ChardevSummary {
+            name: "vdagent".to_owned(),
+            owner: "com.redhat.spice.0".to_owned(),
+            frontend_open: true,
+            echo: false,
+        }]);
+
+        assert_eq!(status, ClipboardAgentStatus::Connected);
+    }
+
+    #[test]
+    fn disconnected_vdagent_channel_is_detected() {
+        let status = clipboard_agent_status(&[ChardevSummary {
+            name: "vdagent".to_owned(),
+            owner: "com.redhat.spice.0".to_owned(),
+            frontend_open: false,
+            echo: false,
+        }]);
+
+        assert_eq!(status, ClipboardAgentStatus::GuestDisconnected);
+    }
+
+    #[test]
+    fn missing_vdagent_export_is_treated_as_unknown_not_missing() {
+        let status = clipboard_agent_status(&[]);
+
+        assert_eq!(status, ClipboardAgentStatus::Unknown);
+    }
+
+    #[test]
+    fn inspection_warnings_cover_missing_audio_and_disconnected_clipboard_agent() {
+        let report = sample_report(
+            false,
+            true,
+            vec![ChardevSummary {
+                name: "vdagent".to_owned(),
+                owner: "com.redhat.spice.0".to_owned(),
+                frontend_open: false,
+                echo: false,
+            }],
+        );
+
+        let warnings = suggested_inspection_warnings(&report);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("audio object"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("guest side is not connected"))
+        );
+    }
+
+    #[test]
+    fn inspection_warnings_do_not_claim_missing_clipboard_agent_when_unverifiable() {
+        let report = sample_report(true, true, Vec::new());
+
+        let warnings = suggested_inspection_warnings(&report);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn inspection_warnings_cover_missing_clipboard_object() {
+        let report = sample_report(true, false, Vec::new());
+
+        let warnings = suggested_inspection_warnings(&report);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("clipboard object"));
     }
 }

@@ -11,6 +11,8 @@ use anyhow::{Context, Result};
 use qemu_display::{Audio, AudioOutHandler, Display, PCMInfo, Volume};
 use zbus::Connection;
 
+use crate::diagnostics;
+
 pub(super) async fn register_audio_output(
     connection: &Connection,
     owner: &str,
@@ -280,12 +282,12 @@ fn spawn_stderr_monitor(backend: AudioBackend, stream_label: String, stderr: Chi
         .spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(std::result::Result::ok) {
-                eprintln!(
-                    "QD2 audio backend `{}` ({}): {}",
+                diagnostics::verbose(format!(
+                    "audio backend `{}` ({}): {}",
                     backend.name(),
                     stream_label,
                     line
-                );
+                ));
                 maybe_print_audio_environment_hint(backend, Some(line.as_str()));
             }
         });
@@ -315,48 +317,12 @@ fn maybe_print_audio_environment_hint(backend: AudioBackend, stderr_line: Option
         return;
     }
 
-    let Some(hint) = pipewire_sudo_environment_hint() else {
+    let Some(hint) = diagnostics::pipewire_sudo_environment_hint() else {
         return;
     };
     if AUDIO_ENVIRONMENT_HINT_EMITTED.set(()).is_ok() {
         eprintln!("{hint}");
     }
-}
-
-fn pipewire_sudo_environment_hint() -> Option<String> {
-    pipewire_sudo_environment_hint_from(
-        std::env::var("SUDO_USER").ok().as_deref(),
-        std::env::var("SUDO_UID").ok().as_deref(),
-        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
-        std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().as_deref(),
-    )
-}
-
-fn pipewire_sudo_environment_hint_from(
-    sudo_user: Option<&str>,
-    sudo_uid: Option<&str>,
-    xdg_runtime_dir: Option<&str>,
-    dbus_session_bus: Option<&str>,
-) -> Option<String> {
-    let sudo_user = sudo_user?;
-
-    let runtime_matches_user_session = sudo_uid
-        .zip(xdg_runtime_dir)
-        .is_some_and(|(uid, runtime)| runtime == format!("/run/user/{uid}"));
-    let dbus_matches_user_session = sudo_uid
-        .zip(dbus_session_bus)
-        .is_some_and(|(uid, address)| address.contains(&format!("/run/user/{uid}/bus")));
-
-    if runtime_matches_user_session && dbus_matches_user_session {
-        return None;
-    }
-
-    Some(format!(
-        "QD2 audio hint: `pw-play` is running under sudo without the `{sudo_user}` desktop audio session environment. \
-PipeWire playback usually needs the user session vars. Try rerunning with:\n  \
-sudo --preserve-env=XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,WAYLAND_DISPLAY,PULSE_SERVER,PULSE_COOKIE qd2 connect ...\n  \
-or run QD2 as your regular user after granting access to the QEMU D-Bus socket."
-    ))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -725,10 +691,7 @@ fn scale_float64(sample: &mut [u8], factor: f64, be: bool) {
 mod tests {
     use qemu_display::{PCMInfo, Volume};
 
-    use super::{
-        aplay_format, apply_volume, pipewire_sudo_environment_hint_from, preferred_backends,
-        pw_play_format,
-    };
+    use super::{aplay_format, apply_volume, preferred_backends, pw_play_format};
 
     fn pcm_info(bits: u8, is_signed: bool, is_float: bool, bytes_per_frame: u32) -> PCMInfo {
         PCMInfo {
@@ -793,33 +756,5 @@ mod tests {
         assert!(scaled_left < 1_000);
         assert!(scaled_left > 400);
         assert_eq!(scaled_right, 2_000);
-    }
-
-    #[test]
-    fn sudo_pipewire_hint_is_suppressed_with_preserved_user_session_env() {
-        assert_eq!(
-            pipewire_sudo_environment_hint_from(
-                Some("alice"),
-                Some("1000"),
-                Some("/run/user/1000"),
-                Some("unix:path=/run/user/1000/bus"),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn sudo_pipewire_hint_is_emitted_when_root_session_env_is_used() {
-        let hint = pipewire_sudo_environment_hint_from(
-            Some("alice"),
-            Some("1000"),
-            Some("/run/user/0"),
-            None,
-        )
-        .expect("expected a sudo + PipeWire hint");
-
-        assert!(hint.contains("alice"));
-        assert!(hint.contains("--preserve-env"));
-        assert!(hint.contains("QEMU D-Bus socket"));
     }
 }

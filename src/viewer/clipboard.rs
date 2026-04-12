@@ -21,6 +21,8 @@ use qemu_display::{
 use tokio::sync::mpsc as tokio_mpsc;
 use zbus::Connection;
 
+use crate::diagnostics;
+
 use super::{InputEvent, ViewerEvent};
 
 const TEXT_PLAIN_UTF8: &str = "text/plain;charset=utf-8";
@@ -217,7 +219,7 @@ struct RemoteFetchPlan {
 }
 
 pub(super) fn debug(message: impl AsRef<str>) {
-    if clipboard_debug_enabled() {
+    if clipboard_debug_enabled() || diagnostics::verbose_enabled() {
         eprintln!("[qd2-clipboard] {}", message.as_ref());
     }
 }

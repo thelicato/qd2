@@ -1,4 +1,5 @@
 mod cli;
+mod diagnostics;
 mod qemu;
 mod viewer;
 
@@ -10,6 +11,7 @@ use crate::cli::{Cli, Command};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    diagnostics::set_verbose(cli.verbose);
 
     match cli.command {
         Command::List(args) => {
@@ -21,6 +23,10 @@ async fn main() -> Result<()> {
             let report = qemu::inspect(args.address(), args.vm.as_deref()).await?;
             print_warnings(&report.warnings);
             print_inspection(&report);
+        }
+        Command::Doctor(args) => {
+            let report = diagnostics::doctor(args.address(), args.vm.as_deref()).await;
+            print_doctor(&report);
         }
         Command::Connect(args) => {
             let target =
@@ -126,5 +132,44 @@ fn yes_no(value: bool) -> &'static str {
 fn print_warnings(warnings: &[String]) {
     for warning in warnings {
         eprintln!("Warning: {warning}");
+    }
+}
+
+fn print_doctor(report: &diagnostics::DoctorReport) {
+    println!("Host checks:");
+    for check in &report.host_checks {
+        print_doctor_check(check);
+    }
+
+    if !report.vm_checks.is_empty() {
+        println!();
+        if let Some(inspection) = &report.inspected_vm {
+            println!("VM checks for {}:", inspection.vm.name);
+        } else {
+            println!("VM checks:");
+        }
+
+        for check in &report.vm_checks {
+            print_doctor_check(check);
+        }
+    }
+}
+
+fn print_doctor_check(check: &diagnostics::DoctorCheck) {
+    let label = match check.status {
+        diagnostics::DoctorStatus::Ok => "OK",
+        diagnostics::DoctorStatus::Warn => "WARN",
+        diagnostics::DoctorStatus::Fail => "FAIL",
+    };
+
+    let mut lines = check.detail.lines();
+    if let Some(first_line) = lines.next() {
+        println!("  [{label}] {}: {first_line}", check.name);
+    } else {
+        println!("  [{label}] {}", check.name);
+    }
+
+    for line in lines {
+        println!("      {line}");
     }
 }

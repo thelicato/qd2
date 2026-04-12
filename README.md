@@ -8,9 +8,11 @@ The current implementation covers discovery, inspection, and a graphical viewer:
 
 - `qd2 list` enumerates visible QEMU D-Bus VMs on the session bus and common libvirt private D-Bus socket directories.
 - `qd2 inspect` shows VM metadata, console details, and exported helper interfaces.
+- `qd2 doctor` checks the local GTK/audio/session environment and reports common VM-side issues such as missing clipboard or audio wiring.
 - `qd2 connect` opens a GTK4 window for one console and renders both framebuffer and DMABUF scanouts when available.
 - `qd2 connect` forwards keyboard and mouse input, tracks guest cursor shape updates, syncs clipboard content, and plays guest audio when the QEMU audio interface is available.
 - `qd2 connect --hotkeys ...` overrides viewer shortcuts such as fullscreen toggling and input release.
+- `--verbose` enables extra discovery/viewer diagnostics without needing the clipboard-specific debug env var.
 - `--address <DBUS_ADDRESS>` connects to a custom D-Bus bus instead of the session bus.
 
 ## Example
@@ -20,11 +22,14 @@ cargo run -- list
 cargo run -- inspect
 cargo run -- inspect --vm :1.421
 cargo run -- inspect --vm demo-vm
+cargo run -- doctor
+cargo run -- doctor --vm demo-vm
 cargo run -- list --address "unix:path=/tmp/qemu-bus"
 cargo run -- inspect --address "unix:path=/run/libvirt/qemu/dbus/12-oscp-dbus.sock"
 cargo run -- connect --address "unix:path=/run/libvirt/qemu/dbus/12-oscp-dbus.sock"
 cargo run -- connect --address "unix:path=/run/libvirt/qemu/dbus/12-oscp-dbus.sock" \
   --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"
+cargo run -- --verbose connect --address "unix:path=/run/libvirt/qemu/dbus/12-oscp-dbus.sock"
 ```
 
 ## References
