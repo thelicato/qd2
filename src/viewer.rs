@@ -49,6 +49,35 @@ const PIXMAN_X8B8G8R8: u32 = pixman_format_code_t_PIXMAN_x8b8g8r8;
 const PIXMAN_X8R8G8B8: u32 = pixman_format_code_t_PIXMAN_x8r8g8b8;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const APP_ICON_PNG: &[u8] = include_bytes!("../logo.png");
+const FULLSCREEN_HOVER_HIDE_DELAY: Duration = Duration::from_millis(900);
+const VIEWER_CSS: &str = r#"
+.viewer-floating-controls {
+    background: rgba(28, 28, 32, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    padding: 6px 8px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.viewer-floating-controls button,
+.viewer-floating-controls menubutton {
+    min-width: 34px;
+    min-height: 34px;
+}
+
+.viewer-title {
+    font-weight: 600;
+}
+
+.viewer-popover {
+    padding: 6px;
+}
+
+.viewer-popover button {
+    padding: 8px 12px;
+    border-radius: 10px;
+}
+"#;
 
 pub fn connect(target: ConnectTarget) -> Result<()> {
     let (event_tx, event_rx) = std_mpsc::channel();
@@ -131,10 +160,9 @@ async fn listener_main(
         .console_interfaces
         .iter()
         .any(|interface| interface == "org.qemu.Display1.Mouse");
-    let mouse_mode = if mouse_available {
+    let mut mouse_mode = if mouse_available {
         match console.mouse_is_absolute().await {
-            Ok(true) => MouseMode::Absolute,
-            Ok(false) => MouseMode::Relative,
+            Ok(is_absolute) => MouseMode::from_is_absolute(is_absolute),
             Err(error) => {
                 let _ = event_tx.send(ViewerEvent::Status(format!(
                     "Could not detect mouse mode: {error:#}"
@@ -160,9 +188,35 @@ async fn listener_main(
             maybe_input = input_rx.recv() => match maybe_input {
                 Some(input) => {
                     if let Err(error) = console.handle_input(input).await {
-                        let _ = event_tx.send(ViewerEvent::Status(format!(
-                            "Input forwarding failed: {error:#}"
-                        )));
+                        let recovered = if input_needs_mouse_mode(input) {
+                            match console.mouse_is_absolute().await {
+                                Ok(is_absolute) => {
+                                    let detected_mode = MouseMode::from_is_absolute(is_absolute);
+                                    if detected_mode != mouse_mode {
+                                        mouse_mode = detected_mode;
+                                        let _ =
+                                            event_tx.send(ViewerEvent::MouseModeChanged(detected_mode));
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                Err(mode_error) => {
+                                    let _ = event_tx.send(ViewerEvent::Status(format!(
+                                        "Input forwarding failed: {error:#}\n\nCould not re-check the mouse mode: {mode_error:#}"
+                                    )));
+                                    true
+                                }
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !recovered {
+                            let _ = event_tx.send(ViewerEvent::Status(format!(
+                                "Input forwarding failed: {error:#}"
+                            )));
+                        }
                     }
                 }
                 None => break,
@@ -206,15 +260,17 @@ fn run_window(
     let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
     container.append(&status_label);
     container.append(&picture);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&container));
 
     let window = gtk::Window::builder()
         .title(&ready.title)
         .default_width(window_width)
         .default_height(window_height)
-        .child(&container)
+        .child(&overlay)
         .build();
     window.set_resizable(true);
-    if let Some(icon) = app_icon {
+    if let Some(icon) = app_icon.clone() {
         window.connect_realize(move |window| {
             if let Err(error) = apply_window_icon(window, &icon) {
                 eprintln!("QD2 icon error: {error:#}");
@@ -222,12 +278,138 @@ fn run_window(
         });
     }
 
+    let display = gtk::prelude::RootExt::display(&window);
+    install_viewer_css(&display);
+
+    let title_label = gtk::Label::new(Some(&ready.title));
+    title_label.add_css_class("viewer-title");
+
+    let (titlebar_controls, titlebar_fullscreen_button) =
+        build_viewer_controls(&window, app_icon.as_ref());
+    let header_bar = gtk::HeaderBar::new();
+    header_bar.set_show_title_buttons(true);
+    header_bar.set_title_widget(Some(&title_label));
+    header_bar.pack_end(&titlebar_controls);
+    window.set_titlebar(Some(&header_bar));
+
+    let (floating_controls, overlay_fullscreen_button) =
+        build_viewer_controls(&window, app_icon.as_ref());
+    floating_controls.add_css_class("viewer-floating-controls");
+
+    let fullscreen_revealer = gtk::Revealer::builder()
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Start)
+        .margin_top(12)
+        .transition_duration(180)
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .build();
+    fullscreen_revealer.set_child(Some(&floating_controls));
+    fullscreen_revealer.set_visible(false);
+    overlay.add_overlay(&fullscreen_revealer);
+    overlay.set_measure_overlay(&fullscreen_revealer, false);
+    overlay.set_clip_overlay(&fullscreen_revealer, false);
+
+    let fullscreen_hotspot = gtk::Box::builder()
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Start)
+        .width_request(240)
+        .height_request(24)
+        .build();
+    fullscreen_hotspot.set_opacity(0.0);
+    fullscreen_hotspot.set_visible(false);
+    overlay.add_overlay(&fullscreen_hotspot);
+    overlay.set_measure_overlay(&fullscreen_hotspot, false);
+    overlay.set_clip_overlay(&fullscreen_hotspot, false);
+
+    let fullscreen_state = Rc::new(RefCell::new(FullscreenChromeState::default()));
+    let titlebar_widget = header_bar.clone().upcast::<gtk::Widget>();
+    let fullscreen_buttons = vec![
+        titlebar_fullscreen_button.clone(),
+        overlay_fullscreen_button.clone(),
+    ];
+    sync_fullscreen_chrome(
+        &window,
+        &titlebar_widget,
+        &fullscreen_revealer,
+        &fullscreen_hotspot,
+        &fullscreen_buttons,
+        &fullscreen_state,
+    );
+    window.connect_fullscreened_notify({
+        let header_bar = titlebar_widget.clone();
+        let fullscreen_revealer = fullscreen_revealer.clone();
+        let fullscreen_hotspot = fullscreen_hotspot.clone();
+        let fullscreen_buttons = fullscreen_buttons.clone();
+        let fullscreen_state = fullscreen_state.clone();
+        move |window| {
+            sync_fullscreen_chrome(
+                window,
+                &header_bar,
+                &fullscreen_revealer,
+                &fullscreen_hotspot,
+                &fullscreen_buttons,
+                &fullscreen_state,
+            );
+        }
+    });
+
+    let hotspot_motion = gtk::EventControllerMotion::new();
+    hotspot_motion.connect_enter({
+        let window = window.clone();
+        let fullscreen_revealer = fullscreen_revealer.clone();
+        let fullscreen_state = fullscreen_state.clone();
+        move |_, _, _| {
+            reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state);
+            schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state);
+        }
+    });
+    hotspot_motion.connect_leave({
+        let window = window.clone();
+        let fullscreen_revealer = fullscreen_revealer.clone();
+        let fullscreen_state = fullscreen_state.clone();
+        move |_| schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
+    });
+    fullscreen_hotspot.add_controller(hotspot_motion);
+
+    let floating_motion = gtk::EventControllerMotion::new();
+    floating_motion.connect_enter({
+        let fullscreen_revealer = fullscreen_revealer.clone();
+        let fullscreen_state = fullscreen_state.clone();
+        move |_, _, _| reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state)
+    });
+    floating_motion.connect_leave({
+        let window = window.clone();
+        let fullscreen_revealer = fullscreen_revealer.clone();
+        let fullscreen_state = fullscreen_state.clone();
+        move |_| schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
+    });
+    floating_controls.add_controller(floating_motion);
+
+    let viewer_shortcuts = gtk::EventControllerKey::new();
+    viewer_shortcuts.set_propagation_phase(gtk::PropagationPhase::Capture);
+    viewer_shortcuts.connect_key_pressed({
+        let window = window.clone();
+        move |_, keyval, _, _| match keyval {
+            gdk::Key::F11 => {
+                toggle_fullscreen(&window);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Escape if window.is_fullscreen() => {
+                window.unfullscreen();
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
+    });
+    picture.add_controller(viewer_shortcuts);
+
     let ui_state = Rc::new(RefCell::new(UiState::default()));
+    let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
     install_input_controllers(
         &picture,
         ui_state.clone(),
         input_tx,
-        ready.mouse_mode,
+        mouse_mode.clone(),
         ready.keyboard_available,
     );
 
@@ -236,7 +418,6 @@ fn run_window(
     let current_dmabuf = Rc::new(RefCell::new(None::<DmabufPresentation>));
     #[cfg(unix)]
     let dmabuf_transform = Rc::new(RefCell::new(DmabufViewTransform::default()));
-    let display = gtk::prelude::RootExt::display(&window);
     let window_base_title = ready.title.clone();
     #[cfg(unix)]
     {
@@ -298,6 +479,7 @@ fn run_window(
         let picture = picture.clone();
         let status_label = status_label.clone();
         let ui_state = ui_state.clone();
+        let mouse_mode = mouse_mode.clone();
         let window = window.clone();
         let vm_name = target.vm_name.clone();
         let window_base_title = window_base_title.clone();
@@ -325,6 +507,10 @@ fn run_window(
                     }
                     #[cfg(unix)]
                     Ok(ViewerEvent::DmabufUpdate(update)) => dmabuf_updates.push(update),
+                    Ok(ViewerEvent::MouseModeChanged(mode)) => {
+                        *mouse_mode.borrow_mut() = mode;
+                        ui_state.borrow_mut().last_pointer_guest_position = None;
+                    }
                     Ok(ViewerEvent::Status(message)) => latest_status = Some(message),
                     Ok(ViewerEvent::Disconnected) => disconnected = true,
                     Err(TryRecvError::Empty) => break,
@@ -482,6 +668,207 @@ fn apply_window_icon(window: &gtk::Window, icon: &gdk::Texture) -> Result<()> {
         .context("GTK surface is not a toplevel window")?;
     toplevel.set_icon_list(std::slice::from_ref(icon));
     Ok(())
+}
+
+#[derive(Default)]
+struct FullscreenChromeState {
+    hide_source: Option<glib::SourceId>,
+}
+
+fn install_viewer_css(display: &gdk::Display) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(VIEWER_CSS);
+    gtk::style_context_add_provider_for_display(
+        display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+fn build_viewer_controls(
+    window: &gtk::Window,
+    app_icon: Option<&gdk::Texture>,
+) -> (gtk::Box, gtk::Button) {
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+
+    let fullscreen_button = gtk::Button::from_icon_name("view-fullscreen-symbolic");
+    fullscreen_button.add_css_class("flat");
+    fullscreen_button.add_css_class("circular");
+    fullscreen_button.set_tooltip_text(Some("Fullscreen"));
+    fullscreen_button.connect_clicked({
+        let window = window.clone();
+        move |_| toggle_fullscreen(&window)
+    });
+
+    let popover = gtk::Popover::new();
+    popover.set_has_arrow(false);
+    popover.add_css_class("viewer-popover");
+
+    let popover_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+
+    let shortcuts_button = gtk::Button::with_label("Keyboard shortcuts");
+    shortcuts_button.set_halign(gtk::Align::Fill);
+    shortcuts_button.add_css_class("flat");
+    shortcuts_button.connect_clicked({
+        let popover = popover.clone();
+        let window = window.clone();
+        move |_| {
+            popover.popdown();
+            show_keyboard_shortcuts(&window);
+        }
+    });
+    popover_box.append(&shortcuts_button);
+
+    let about_button = gtk::Button::with_label("About");
+    about_button.set_halign(gtk::Align::Fill);
+    about_button.add_css_class("flat");
+    about_button.connect_clicked({
+        let popover = popover.clone();
+        let window = window.clone();
+        let app_icon = app_icon.cloned();
+        move |_| {
+            popover.popdown();
+            show_about_dialog(&window, app_icon.clone());
+        }
+    });
+    popover_box.append(&about_button);
+
+    popover.set_child(Some(&popover_box));
+
+    let menu_button = gtk::MenuButton::new();
+    menu_button.set_icon_name("view-more-symbolic");
+    menu_button.set_tooltip_text(Some("More"));
+    menu_button.add_css_class("flat");
+    menu_button.add_css_class("circular");
+    menu_button.set_popover(Some(&popover));
+
+    controls.append(&fullscreen_button);
+    controls.append(&menu_button);
+
+    (controls, fullscreen_button)
+}
+
+fn show_keyboard_shortcuts(window: &gtk::Window) {
+    let shortcuts = gtk::ShortcutsWindow::builder()
+        .title("Keyboard Shortcuts")
+        .modal(true)
+        .transient_for(window)
+        .build();
+
+    let section = gtk::ShortcutsSection::builder()
+        .title("Viewer")
+        .section_name("viewer")
+        .build();
+    let group = gtk::ShortcutsGroup::builder().title("Display").build();
+
+    for (title, accelerator) in [
+        ("Toggle fullscreen", "F11"),
+        ("Leave fullscreen", "Escape"),
+        ("Rotate DMABUF view", "<Control><Alt>r"),
+        ("Toggle DMABUF vertical flip", "<Control><Alt>f"),
+        ("Reset DMABUF transform", "<Control><Alt>0"),
+    ] {
+        let shortcut = gtk::ShortcutsShortcut::builder()
+            .title(title)
+            .accelerator(accelerator)
+            .build();
+        group.add_shortcut(&shortcut);
+    }
+
+    section.add_group(&group);
+    shortcuts.add_section(&section);
+    shortcuts.present();
+}
+
+fn show_about_dialog(window: &gtk::Window, app_icon: Option<gdk::Texture>) {
+    let about = gtk::AboutDialog::new();
+    about.set_transient_for(Some(window));
+    about.set_modal(true);
+    about.set_program_name(Some("QD2"));
+    about.set_version(Some(env!("CARGO_PKG_VERSION")));
+    about.set_comments(Some("QEMU D-Bus Display client"));
+    if let Some(icon) = app_icon.as_ref() {
+        about.set_logo(Some(icon));
+    }
+    about.present();
+}
+
+fn toggle_fullscreen(window: &gtk::Window) {
+    if window.is_fullscreen() {
+        window.unfullscreen();
+    } else {
+        window.fullscreen();
+    }
+}
+
+fn update_fullscreen_button(button: &gtk::Button, is_fullscreen: bool) {
+    if is_fullscreen {
+        button.set_icon_name("view-restore-symbolic");
+        button.set_tooltip_text(Some("Leave fullscreen"));
+    } else {
+        button.set_icon_name("view-fullscreen-symbolic");
+        button.set_tooltip_text(Some("Fullscreen"));
+    }
+}
+
+fn cancel_fullscreen_bar_hide(state: &Rc<RefCell<FullscreenChromeState>>) {
+    if let Some(source) = state.borrow_mut().hide_source.take() {
+        source.remove();
+    }
+}
+
+fn reveal_fullscreen_bar(revealer: &gtk::Revealer, state: &Rc<RefCell<FullscreenChromeState>>) {
+    cancel_fullscreen_bar_hide(state);
+    revealer.set_visible(true);
+    revealer.set_reveal_child(true);
+}
+
+fn schedule_hide_fullscreen_bar(
+    window: &gtk::Window,
+    revealer: &gtk::Revealer,
+    state: &Rc<RefCell<FullscreenChromeState>>,
+) {
+    if !window.is_fullscreen() {
+        return;
+    }
+
+    cancel_fullscreen_bar_hide(state);
+
+    let revealer = revealer.clone();
+    let state_handle = state.clone();
+    let source = glib::timeout_add_local_once(FULLSCREEN_HOVER_HIDE_DELAY, move || {
+        revealer.set_reveal_child(false);
+        revealer.set_visible(false);
+        state_handle.borrow_mut().hide_source = None;
+    });
+    state.borrow_mut().hide_source = Some(source);
+}
+
+fn sync_fullscreen_chrome(
+    window: &gtk::Window,
+    header_bar: &gtk::Widget,
+    fullscreen_revealer: &gtk::Revealer,
+    fullscreen_hotspot: &gtk::Box,
+    fullscreen_buttons: &[gtk::Button],
+    fullscreen_state: &Rc<RefCell<FullscreenChromeState>>,
+) {
+    let is_fullscreen = window.is_fullscreen();
+    for button in fullscreen_buttons {
+        update_fullscreen_button(button, is_fullscreen);
+    }
+
+    if is_fullscreen {
+        window.set_titlebar(None::<&gtk::Widget>);
+        fullscreen_hotspot.set_visible(true);
+        reveal_fullscreen_bar(fullscreen_revealer, fullscreen_state);
+        schedule_hide_fullscreen_bar(window, fullscreen_revealer, fullscreen_state);
+    } else {
+        cancel_fullscreen_bar_hide(fullscreen_state);
+        fullscreen_revealer.set_reveal_child(false);
+        fullscreen_revealer.set_visible(false);
+        fullscreen_hotspot.set_visible(false);
+        window.set_titlebar(Some(header_bar));
+    }
 }
 
 enum PresentationEvent {
@@ -843,6 +1230,7 @@ enum ViewerEvent {
     Dmabuf(DmabufFrame),
     #[cfg(unix)]
     DmabufUpdate(UpdateDMABUF),
+    MouseModeChanged(MouseMode),
     Status(String),
     Disconnected,
 }
@@ -852,6 +1240,16 @@ enum MouseMode {
     Disabled,
     Relative,
     Absolute,
+}
+
+impl MouseMode {
+    fn from_is_absolute(is_absolute: bool) -> Self {
+        if is_absolute {
+            Self::Absolute
+        } else {
+            Self::Relative
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1925,7 +2323,7 @@ fn install_input_controllers(
     picture: &gtk::Picture,
     ui_state: Rc<RefCell<UiState>>,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
-    mouse_mode: MouseMode,
+    mouse_mode: Rc<RefCell<MouseMode>>,
     keyboard_available: bool,
 ) {
     if keyboard_available {
@@ -1951,7 +2349,7 @@ fn install_input_controllers(
         picture.add_controller(key_controller);
     }
 
-    if mouse_mode == MouseMode::Disabled {
+    if *mouse_mode.borrow() == MouseMode::Disabled {
         return;
     }
 
@@ -1961,9 +2359,10 @@ fn install_input_controllers(
         let picture = picture.clone();
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
+        let mouse_mode = mouse_mode.clone();
         move |gesture, _, x, y| {
             picture.grab_focus();
-            sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y);
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
 
             if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
                 let _ = input_tx.send(InputEvent::MousePress(button));
@@ -1974,8 +2373,9 @@ fn install_input_controllers(
         let picture = picture.clone();
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
+        let mouse_mode = mouse_mode.clone();
         move |gesture, _, x, y| {
-            sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y);
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
 
             if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
                 let _ = input_tx.send(InputEvent::MouseRelease(button));
@@ -1989,13 +2389,15 @@ fn install_input_controllers(
         let picture = picture.clone();
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
-        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y)
+        let mouse_mode = mouse_mode.clone();
+        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
     });
     motion.connect_motion({
         let picture = picture.clone();
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
-        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, mouse_mode, x, y)
+        let mouse_mode = mouse_mode.clone();
+        move |_, x, y| sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
     });
     motion.connect_leave({
         let ui_state = ui_state.clone();
@@ -2026,7 +2428,7 @@ fn sync_mouse_position(
     picture: &gtk::Picture,
     ui_state: &Rc<RefCell<UiState>>,
     input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
-    mouse_mode: MouseMode,
+    mouse_mode: &Rc<RefCell<MouseMode>>,
     x: f64,
     y: f64,
 ) {
@@ -2047,7 +2449,7 @@ fn sync_mouse_position(
     };
 
     let mut ui_state = ui_state.borrow_mut();
-    match mouse_mode {
+    match *mouse_mode.borrow() {
         MouseMode::Disabled => {}
         MouseMode::Absolute => {
             let _ = input_tx.send(InputEvent::MouseAbs {
@@ -2067,6 +2469,13 @@ fn sync_mouse_position(
             ui_state.last_pointer_guest_position = Some((guest_x, guest_y));
         }
     }
+}
+
+fn input_needs_mouse_mode(input: InputEvent) -> bool {
+    matches!(
+        input,
+        InputEvent::MouseAbs { .. } | InputEvent::MouseRel { .. }
+    )
 }
 
 fn emit_scroll_buttons(
@@ -2324,8 +2733,8 @@ fn suggested_window_size(width: u32, height: u32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Framebuffer, PixelFormat, dmabuf_update_rectangle, linux_keycode_to_qnum,
-        widget_coords_to_guest_position,
+        Framebuffer, InputEvent, PixelFormat, dmabuf_update_rectangle, input_needs_mouse_mode,
+        linux_keycode_to_qnum, widget_coords_to_guest_position,
     };
     use qemu_display::{Scanout, UpdateDMABUF};
 
@@ -2390,6 +2799,19 @@ mod tests {
         assert_eq!(linux_keycode_to_qnum(97), Some(157));
         assert_eq!(linux_keycode_to_qnum(103), Some(200));
         assert_eq!(linux_keycode_to_qnum(125), Some(219));
+    }
+
+    #[test]
+    fn mouse_mode_is_only_rechecked_for_motion_inputs() {
+        assert!(input_needs_mouse_mode(InputEvent::MouseAbs { x: 1, y: 2 }));
+        assert!(input_needs_mouse_mode(InputEvent::MouseRel {
+            dx: 3,
+            dy: -4
+        }));
+        assert!(!input_needs_mouse_mode(InputEvent::MousePress(
+            qemu_display::MouseButton::Left
+        )));
+        assert!(!input_needs_mouse_mode(InputEvent::KeyPress(42)));
     }
 
     #[test]
