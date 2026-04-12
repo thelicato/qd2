@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: QD2 Documentation
+    url: https://github.com/thelicato/qd2#readme
+    about: Check the README for runtime requirements, known limitations, and command usage before filing an issue.

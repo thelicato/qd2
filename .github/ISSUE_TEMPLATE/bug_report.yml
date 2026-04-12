@@ -1,0 +1,100 @@
+name: Bug report
+description: Report a reproducible problem in QD2
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report.
+
+        Please include enough detail for the issue to be reproduced. For QD2, environment details and VM wiring often matter as much as the visible symptom.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+      placeholder: QD2 connects, shows the guest window, but clipboard only works from host to guest.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: Include the exact steps and commands when possible.
+      placeholder: |
+        1. Start the VM with ...
+        2. Run `qd2 connect ...`
+        3. Copy text in the guest
+        4. Paste on the host
+    validations:
+      required: true
+
+  - type: input
+    id: qd2-version
+    attributes:
+      label: QD2 version
+      description: Tag, release version, or commit SHA
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: launch-mode
+    attributes:
+      label: How was QD2 launched?
+      options:
+        - As my normal user
+        - With sudo
+        - From a packaged release binary
+        - From cargo run / local build
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Host environment
+      description: Include OS, architecture, desktop session, and anything important like Wayland/X11.
+      placeholder: Debian 13, x86_64, GNOME on Wayland
+    validations:
+      required: true
+
+  - type: textarea
+    id: vm
+    attributes:
+      label: VM and QEMU details
+      description: Include relevant QEMU command-line snippets, especially display, audio, clipboard, and GPU settings.
+      render: shell
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: `qd2 doctor` output
+      description: Paste the output of `qd2 doctor` or `qd2 doctor --vm <name>`.
+      render: text
+
+  - type: textarea
+    id: inspect
+    attributes:
+      label: `qd2 inspect` output
+      description: Paste the output of `qd2 inspect --vm <name>` or `qd2 inspect --address ...`.
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or stderr
+      description: Include QD2 stderr, viewer warnings, audio errors, clipboard debug logs, or permission failures.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, recordings, comparisons with virt-viewer, or other details that may help.
+

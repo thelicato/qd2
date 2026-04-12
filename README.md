@@ -133,6 +133,13 @@ Each release includes:
 - release notes generated with `npx changelogithub`
 - a `SHA256SUMS.txt` file for checksum verification
 
+## 🤝 Contributing
+
+Bug reports and pull requests are welcome.
+
+- Read the contribution guide in [CONTRIBUTING.md](./CONTRIBUTING.md)
+- Use the GitHub issue forms for bug reports and feature requests so the right diagnostics and VM details are captured up front
+
 ## 🧭 Structure
 
 | File | Purpose |

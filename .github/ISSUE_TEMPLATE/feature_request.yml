@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an improvement or new capability for QD2
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea.
+
+        The most helpful requests explain the user workflow, not just the feature name. QD2 is especially interested in improvements around reliability, diagnostics, viewer polish, and QEMU D-Bus usability.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the workflow pain point first.
+      placeholder: I often connect without `--vm` and need a fast way to pick the right machine.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like QD2 to do?
+      description: Describe the behavior you want to see.
+      placeholder: Show a small chooser window listing visible VMs and let me connect with one click.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. Existing workarounds, similar behavior in other tools, or tradeoffs you have considered.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: VM setup, screenshots, examples from virt-viewer, or links to QEMU docs are welcome.
+
