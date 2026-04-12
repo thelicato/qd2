@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use gtk::{gdk, glib, prelude::*};
+use gtk::{cairo, gdk, glib, prelude::*};
 use gtk4 as gtk;
 use pixman_sys::{
     pixman_format_code_t_PIXMAN_a8b8g8r8, pixman_format_code_t_PIXMAN_a8r8g8b8,
@@ -223,10 +223,14 @@ fn run_window(
     );
 
     let event_rx = Rc::new(RefCell::new(event_rx));
+    #[cfg(unix)]
+    let current_dmabuf = Rc::new(RefCell::new(None::<DmabufPresentation>));
     let display = gtk::prelude::RootExt::display(&window);
     let window_base_title = ready.title.clone();
     glib::timeout_add_local(FRAME_POLL_INTERVAL, {
         let event_rx = event_rx.clone();
+        #[cfg(unix)]
+        let current_dmabuf = current_dmabuf.clone();
         let display = display.clone();
         let picture = picture.clone();
         let status_label = status_label.clone();
@@ -238,7 +242,7 @@ fn run_window(
         move || {
             let mut latest_presentation = None;
             #[cfg(unix)]
-            let mut dmabuf_updated = false;
+            let mut dmabuf_updates = Vec::new();
             let mut latest_status = None;
             let mut disconnected = false;
 
@@ -257,9 +261,7 @@ fn run_window(
                         latest_presentation = Some(PresentationEvent::Dmabuf(scanout))
                     }
                     #[cfg(unix)]
-                    Ok(ViewerEvent::DmabufUpdate(_update)) => {
-                        dmabuf_updated = true;
-                    }
+                    Ok(ViewerEvent::DmabufUpdate(update)) => dmabuf_updates.push(update),
                     Ok(ViewerEvent::Status(message)) => latest_status = Some(message),
                     Ok(ViewerEvent::Disconnected) => disconnected = true,
                     Err(TryRecvError::Empty) => break,
@@ -273,6 +275,11 @@ fn run_window(
             if let Some(presentation) = latest_presentation {
                 match presentation {
                     PresentationEvent::Frame(frame) => {
+                        #[cfg(unix)]
+                        {
+                            *current_dmabuf.borrow_mut() = None;
+                        }
+
                         let bytes = glib::Bytes::from_owned(frame.data);
                         let texture = gdk::MemoryTexture::new(
                             i32::try_from(frame.width).unwrap_or(i32::MAX),
@@ -294,20 +301,29 @@ fn run_window(
                     }
                     #[cfg(unix)]
                     PresentationEvent::Dmabuf(scanout) => {
-                        match build_dmabuf_paintable(&display, scanout) {
-                            Ok(paintable) => {
-                                present_paintable(
-                                    &picture,
-                                    &status_label,
-                                    &ui_state,
-                                    &window,
-                                    &window_base_title,
-                                    &paintable,
-                                    paintable.intrinsic_width().max(0) as u32,
-                                    paintable.intrinsic_height().max(0) as u32,
-                                );
-                            }
+                        match build_dmabuf_presentation(&display, scanout) {
+                            Ok(presentation) => match presentation.to_paintable() {
+                                Ok(paintable) => {
+                                    *current_dmabuf.borrow_mut() = Some(presentation);
+                                    present_paintable(
+                                        &picture,
+                                        &status_label,
+                                        &ui_state,
+                                        &window,
+                                        &window_base_title,
+                                        &paintable,
+                                        paintable.intrinsic_width().max(0) as u32,
+                                        paintable.intrinsic_height().max(0) as u32,
+                                    );
+                                }
+                                Err(error) => {
+                                    latest_status = Some(format!(
+                                        "Could not prepare the DMABUF scanout for display: {error:#}"
+                                    ));
+                                }
+                            },
                             Err(error) => {
+                                *current_dmabuf.borrow_mut() = None;
                                 latest_status =
                                     Some(format!("Could not import the DMABUF scanout: {error:#}"));
                             }
@@ -317,8 +333,45 @@ fn run_window(
             }
 
             #[cfg(unix)]
-            if dmabuf_updated {
-                picture.queue_draw();
+            if !dmabuf_updates.is_empty() {
+                let refreshed = {
+                    let mut current_dmabuf = current_dmabuf.borrow_mut();
+                    match current_dmabuf.as_mut() {
+                        Some(presentation) => match presentation.refresh(&display, &dmabuf_updates)
+                        {
+                            Ok(()) => presentation.to_paintable().map(Some),
+                            Err(error) => Err(error),
+                        },
+                        None => Ok(None),
+                    }
+                };
+
+                match refreshed {
+                    Ok(Some(paintable)) => {
+                        present_paintable(
+                            &picture,
+                            &status_label,
+                            &ui_state,
+                            &window,
+                            &window_base_title,
+                            &paintable,
+                            paintable.intrinsic_width().max(0) as u32,
+                            paintable.intrinsic_height().max(0) as u32,
+                        );
+                    }
+                    Ok(None) => {
+                        if latest_status.is_none() {
+                            latest_status = Some(
+                                "Received a DMABUF update before the initial scanout was available."
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        latest_status =
+                            Some(format!("Could not refresh the DMABUF scanout: {error:#}"));
+                    }
+                }
             }
 
             if let Some(message) = latest_status {
@@ -379,84 +432,218 @@ fn present_paintable(
 }
 
 #[cfg(target_os = "linux")]
-fn build_dmabuf_paintable(display: &gdk::Display, scanout: DmabufFrame) -> Result<gdk::Paintable> {
-    if !display
-        .dmabuf_formats()
-        .contains(scanout.fourcc, scanout.modifier)
-    {
+fn build_dmabuf_presentation(
+    display: &gdk::Display,
+    scanout: DmabufFrame,
+) -> Result<DmabufPresentation> {
+    DmabufPresentation::new(display, scanout)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn build_dmabuf_presentation(
+    _display: &gdk::Display,
+    _scanout: DmabufFrame,
+) -> Result<DmabufPresentation> {
+    bail!("DMABUF import is currently supported only on Linux GTK builds")
+}
+
+#[cfg(unix)]
+struct DmabufPresentation {
+    texture: gdk::Texture,
+    fds: Vec<OwnedFd>,
+    width: u32,
+    height: u32,
+    offset: [u32; 4],
+    stride: [u32; 4],
+    fourcc: u32,
+    modifier: u64,
+    y0_top: bool,
+    num_planes: u32,
+}
+
+#[cfg(unix)]
+impl DmabufPresentation {
+    fn new(display: &gdk::Display, scanout: DmabufFrame) -> Result<Self> {
+        let texture = build_dmabuf_texture(
+            display,
+            scanout.width,
+            scanout.height,
+            &scanout.fds,
+            &scanout.offset,
+            &scanout.stride,
+            scanout.fourcc,
+            scanout.modifier,
+            scanout.num_planes,
+            None,
+            None,
+        )?;
+
+        Ok(Self {
+            texture,
+            fds: scanout.fds,
+            width: scanout.width,
+            height: scanout.height,
+            offset: scanout.offset,
+            stride: scanout.stride,
+            fourcc: scanout.fourcc,
+            modifier: scanout.modifier,
+            y0_top: scanout.y0_top,
+            num_planes: scanout.num_planes,
+        })
+    }
+
+    fn refresh(&mut self, display: &gdk::Display, updates: &[UpdateDMABUF]) -> Result<()> {
+        let update_region = dmabuf_update_region(updates, self.width, self.height);
+        let previous_texture = self.texture.clone();
+
+        self.texture = build_dmabuf_texture(
+            display,
+            self.width,
+            self.height,
+            &self.fds,
+            &self.offset,
+            &self.stride,
+            self.fourcc,
+            self.modifier,
+            self.num_planes,
+            update_region.as_ref(),
+            Some(&previous_texture),
+        )?;
+
+        Ok(())
+    }
+
+    fn to_paintable(&self) -> Result<gdk::Paintable> {
+        if self.y0_top {
+            return Ok(self.texture.clone().upcast());
+        }
+
+        let snapshot = gtk::Snapshot::new();
+        let bounds = gtk::graphene::Rect::new(0.0, 0.0, self.width as f32, self.height as f32);
+
+        snapshot.save();
+        snapshot.translate(&gtk::graphene::Point::new(0.0, self.height as f32));
+        snapshot.scale(1.0, -1.0);
+        snapshot.append_texture(&self.texture, &bounds);
+        snapshot.restore();
+
+        snapshot
+            .to_paintable(Some(&gtk::graphene::Size::new(
+                self.width as f32,
+                self.height as f32,
+            )))
+            .context("failed to build a GTK paintable for the DMABUF texture")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn build_dmabuf_texture(
+    display: &gdk::Display,
+    width: u32,
+    height: u32,
+    fds: &[OwnedFd],
+    offset: &[u32; 4],
+    stride: &[u32; 4],
+    fourcc: u32,
+    modifier: u64,
+    num_planes: u32,
+    update_region: Option<&cairo::Region>,
+    update_texture: Option<&gdk::Texture>,
+) -> Result<gdk::Texture> {
+    if !display.dmabuf_formats().contains(fourcc, modifier) {
         bail!(
             "GTK does not support DMABUF fourcc {:#x} with modifier {:#x}",
-            scanout.fourcc,
-            scanout.modifier
+            fourcc,
+            modifier
         );
     }
 
-    let plane_count = usize::try_from(scanout.num_planes).context("invalid DMABUF plane count")?;
-    if plane_count != scanout.fds.len() {
+    let plane_count = usize::try_from(num_planes).context("invalid DMABUF plane count")?;
+    if plane_count != fds.len() {
         bail!(
             "DMABUF reported {} planes but provided {} file descriptors",
-            scanout.num_planes,
-            scanout.fds.len()
+            num_planes,
+            fds.len()
+        );
+    }
+
+    let mut duplicated_fds = Vec::with_capacity(plane_count);
+    for fd in fds.iter().take(plane_count) {
+        duplicated_fds.push(
+            fd.as_fd()
+                .try_clone_to_owned()
+                .context("failed to duplicate the DMABUF plane file descriptor")?,
         );
     }
 
     let mut builder = gdk::DmabufTextureBuilder::new()
         .set_display(display)
-        .set_width(scanout.width)
-        .set_height(scanout.height)
-        .set_fourcc(scanout.fourcc)
-        .set_modifier(scanout.modifier)
-        .set_n_planes(scanout.num_planes);
+        .set_width(width)
+        .set_height(height)
+        .set_fourcc(fourcc)
+        .set_modifier(modifier)
+        .set_n_planes(num_planes);
+
+    if let Some(region) = update_region {
+        builder = builder.set_update_region(Some(region));
+    }
+    if let Some(texture) = update_texture {
+        builder = builder.set_update_texture(Some(texture));
+    }
 
     for plane in 0..plane_count {
         builder = builder
-            .set_offset(plane as u32, scanout.offset[plane])
-            .set_stride(plane as u32, scanout.stride[plane]);
+            .set_offset(plane as u32, offset[plane])
+            .set_stride(plane as u32, stride[plane]);
 
-        // SAFETY: the OwnedFds stay alive until GTK releases the imported texture.
-        builder = unsafe { builder.set_fd(plane as u32, scanout.fds[plane].as_raw_fd()) };
+        // SAFETY: the duplicated OwnedFds stay alive until GTK releases the imported texture.
+        builder = unsafe { builder.set_fd(plane as u32, duplicated_fds[plane].as_raw_fd()) };
     }
 
-    let y0_top = scanout.y0_top;
-    let width = scanout.width;
-    let height = scanout.height;
-    let texture = unsafe { builder.build_with_release_func(move || drop(scanout.fds)) }
+    let texture = unsafe { builder.build_with_release_func(move || drop(duplicated_fds)) }
         .context("GTK rejected the DMABUF scanout")?;
 
-    texture_to_paintable(&texture, width, height, y0_top)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn build_dmabuf_paintable(
-    _display: &gdk::Display,
-    _scanout: DmabufFrame,
-) -> Result<gdk::Paintable> {
-    bail!("DMABUF import is currently supported only on Linux GTK builds")
+    Ok(texture)
 }
 
 #[cfg(unix)]
-fn texture_to_paintable(
-    texture: &gdk::Texture,
+fn dmabuf_update_region(
+    updates: &[UpdateDMABUF],
     width: u32,
     height: u32,
-    y0_top: bool,
-) -> Result<gdk::Paintable> {
-    let snapshot = gtk::Snapshot::new();
-    let bounds = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+) -> Option<cairo::Region> {
+    let rectangles = updates
+        .iter()
+        .filter_map(|update| dmabuf_update_rectangle(*update, width, height))
+        .collect::<Vec<_>>();
 
-    if y0_top {
-        snapshot.append_texture(texture, &bounds);
+    if rectangles.is_empty() {
+        None
     } else {
-        snapshot.save();
-        snapshot.translate(&gtk::graphene::Point::new(0.0, height as f32));
-        snapshot.scale(1.0, -1.0);
-        snapshot.append_texture(texture, &bounds);
-        snapshot.restore();
+        Some(cairo::Region::create_rectangles(&rectangles))
+    }
+}
+
+#[cfg(unix)]
+fn dmabuf_update_rectangle(
+    update: UpdateDMABUF,
+    width: u32,
+    height: u32,
+) -> Option<cairo::RectangleInt> {
+    if update.w <= 0 || update.h <= 0 {
+        return None;
     }
 
-    snapshot
-        .to_paintable(Some(&gtk::graphene::Size::new(width as f32, height as f32)))
-        .context("failed to build a GTK paintable for the DMABUF texture")
+    let x0 = update.x.clamp(0, i32::try_from(width).unwrap_or(i32::MAX));
+    let y0 = update.y.clamp(0, i32::try_from(height).unwrap_or(i32::MAX));
+    let x1 = (i64::from(update.x) + i64::from(update.w)).clamp(0, i64::from(width)) as i32;
+    let y1 = (i64::from(update.y) + i64::from(update.h)).clamp(0, i64::from(height)) as i32;
+
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    Some(cairo::RectangleInt::new(x0, y0, x1 - x0, y1 - y0))
 }
 
 struct ViewerReady {
@@ -533,12 +720,37 @@ impl DmabufFrame {
         let modifier = scanout.modifier;
         let y0_top = scanout.y0_top;
         let num_planes = scanout.num_planes;
+
+        Self::try_from_raw_parts(
+            scanout.into_raw_fds(),
+            width,
+            height,
+            offset,
+            stride,
+            fourcc,
+            modifier,
+            y0_top,
+            num_planes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_from_raw_parts(
+        raw_fds: [i32; 4],
+        width: u32,
+        height: u32,
+        offset: [u32; 4],
+        stride: [u32; 4],
+        fourcc: u32,
+        modifier: u64,
+        y0_top: bool,
+        num_planes: u32,
+    ) -> Result<Self> {
         let plane_count = usize::try_from(num_planes).context("invalid DMABUF plane count")?;
         if plane_count == 0 || plane_count > 4 {
             bail!("DMABUF plane count {} is not supported", num_planes);
         }
 
-        let raw_fds = scanout.into_raw_fds();
         let mut fds = Vec::with_capacity(plane_count);
         for (index, raw_fd) in raw_fds.into_iter().take(plane_count).enumerate() {
             if raw_fd < 0 {
@@ -965,14 +1177,16 @@ impl FrameStreamHandler {
 
     #[cfg(unix)]
     fn scanout_dmabuf(&mut self, scanout: ScanoutDMABUF) {
-        self.framebuffer = None;
-
         match DmabufFrame::try_from_scanout(scanout) {
-            Ok(scanout) => {
-                let _ = self.event_tx.send(ViewerEvent::Dmabuf(scanout));
-            }
+            Ok(scanout) => self.emit_dmabuf_scanout(scanout),
             Err(error) => self.send_status(format!("Unsupported DMABUF scanout: {error:#}")),
         }
+    }
+
+    #[cfg(unix)]
+    fn emit_dmabuf_scanout(&mut self, scanout: DmabufFrame) {
+        self.framebuffer = None;
+        let _ = self.event_tx.send(ViewerEvent::Dmabuf(scanout));
     }
 
     #[cfg(unix)]
@@ -1518,17 +1732,12 @@ impl LocalConsoleListenerDmabuf2 {
         }
 
         self.shared.with_handler(|handler| {
-            handler.scanout_dmabuf(ScanoutDMABUF {
-                fd: fds,
-                width,
-                height,
-                offset: offsets,
-                stride: strides,
-                fourcc,
-                modifier,
-                y0_top,
-                num_planes,
-            });
+            match DmabufFrame::try_from_raw_parts(
+                fds, width, height, offsets, strides, fourcc, modifier, y0_top, num_planes,
+            ) {
+                Ok(scanout) => handler.emit_dmabuf_scanout(scanout),
+                Err(error) => handler.send_status(format!("Unsupported DMABUF scanout: {error:#}")),
+            }
         });
 
         Ok(())
@@ -1937,8 +2146,11 @@ fn suggested_window_size(width: u32, height: u32) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Framebuffer, PixelFormat, linux_keycode_to_qnum, widget_coords_to_guest_position};
-    use qemu_display::Scanout;
+    use super::{
+        Framebuffer, PixelFormat, dmabuf_update_rectangle, linux_keycode_to_qnum,
+        widget_coords_to_guest_position,
+    };
+    use qemu_display::{Scanout, UpdateDMABUF};
 
     #[test]
     #[cfg(target_endian = "little")]
@@ -2016,6 +2228,42 @@ mod tests {
         assert_eq!(
             widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 300.0),
             Some((320, 180))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dmabuf_update_rectangles_are_clipped_to_the_frame() {
+        let rect = dmabuf_update_rectangle(
+            UpdateDMABUF {
+                x: -8,
+                y: 4,
+                w: 20,
+                h: 12,
+            },
+            16,
+            10,
+        )
+        .expect("partially visible DMABUF updates should be clipped");
+
+        assert_eq!(rect.x(), 0);
+        assert_eq!(rect.y(), 4);
+        assert_eq!(rect.width(), 12);
+        assert_eq!(rect.height(), 6);
+
+        assert!(
+            dmabuf_update_rectangle(
+                UpdateDMABUF {
+                    x: 40,
+                    y: 0,
+                    w: 5,
+                    h: 5,
+                },
+                16,
+                10,
+            )
+            .is_none(),
+            "fully out-of-bounds DMABUF updates should be ignored",
         );
     }
 }
