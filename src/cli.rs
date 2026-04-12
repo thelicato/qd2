@@ -25,6 +25,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Open a GTK4 window for one QEMU D-Bus console.
     Connect(ConnectArgs),
+    /// Print the QD2 version.
+    Version,
 }
 
 #[derive(Debug, Clone, Args)]

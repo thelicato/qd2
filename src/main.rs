@@ -52,6 +52,9 @@ async fn main() -> Result<()> {
             print_warnings(&target.warnings);
             viewer::connect(target, args.address(), args.hotkeys.as_deref())?;
         }
+        Command::Version => {
+            println!("qd2 {}", env!("CARGO_PKG_VERSION"));
+        }
     }
 
     Ok(())

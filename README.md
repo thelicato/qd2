@@ -1,16 +1,14 @@
-# QD2
-
 <p align="center">
   <img src="logo.png" alt="QD2 logo" width="220">
 </p>
 
 <p align="center">
-  <strong>QEMU D-Bus Display</strong><br>
-  A modern Rust + GTK4 client for discovering, inspecting, diagnosing, and connecting to QEMU virtual machines exposed through <code>-display dbus</code>.
+  <strong>QD2</strong><br>
+  QD2 (QEMU D-Bus Display) is a modern Rust + GTK4 client for discovering, inspecting, diagnosing, and connecting to QEMU virtual machines exposed through <code>-display dbus</code>.
 </p>
 
 <p align="center">
-  <code>list</code> • <code>inspect</code> • <code>doctor</code> • <code>connect</code>
+  <code>list</code> • <code>inspect</code> • <code>doctor</code> • <code>connect</code> • <code>version</code>
 </p>
 
 QD2 is built for people who want the flexibility of QEMU's D-Bus display stack without giving up a polished desktop viewer. It combines a CLI that is useful for scripting and debugging with a GTK4 frontend that handles real-world VM workflows like framebuffer rendering, DMABUF scanouts, input grab, clipboard sync, audio playback, reconnects, and diagnostics.
@@ -32,9 +30,15 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `qd2 inspect` | Print VM metadata, consoles, chardevs, and exported helper objects. | `cargo run -- inspect --vm demo-vm` |
 | `qd2 doctor` | Check the host environment and report likely VM-side wiring issues. | `cargo run -- doctor --vm demo-vm` |
 | `qd2 connect` | Open the GTK4 viewer for one console. | `cargo run -- connect --address "unix:path=<path_to_sock>"` |
+| `qd2 version` | Print the QD2 version from the Cargo package metadata. | `cargo run -- version` |
+
+## 🛠️ Common Options
+
+| Option | Purpose | Example |
+| --- | --- | --- |
 | `--address <DBUS_ADDRESS>` | Target a specific private D-Bus socket instead of auto-discovery. | `cargo run -- inspect --address "unix:path=<path_to_sock>"` |
 | `--verbose` | Print extra discovery and viewer diagnostics. | `cargo run -- --verbose doctor` |
-| `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format. | `cargo run -- connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
+| `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `cargo run -- connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights
 
@@ -47,25 +51,6 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
 - A VM chooser for the multi-VM `connect` flow.
 - Reconnect handling when the listener drops or the VM restarts.
-
-## 🔧 Typical Workflow
-
-```bash
-cargo run -- list
-
-cargo run -- inspect --vm demo-vm
-
-cargo run -- doctor --vm demo-vm
-
-cargo run -- connect --vm demo-vm
-
-cargo run -- connect \
-  --address "unix:path=<path_to_sock>" \
-  --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"
-
-cargo run -- --verbose connect \
-  --address "unix:path=<path_to_sock>"
-```
 
 ## 🧱 Install Requirements
 
