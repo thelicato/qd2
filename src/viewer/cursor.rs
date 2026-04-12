@@ -14,12 +14,13 @@ pub(super) struct GuestCursor {
     height: i32,
     hotspot_x: i32,
     hotspot_y: i32,
-    argb: Vec<u8>,
+    rgba: Vec<u8>,
 }
 
 impl GuestCursor {
-    /// QEMU sends `CursorDefine` data as raw ARGB bytes, so we keep that exact
-    /// layout and hand it to GTK with the matching `MemoryFormat`.
+    /// QEMU sends cursor pixels as ARGB32 words. On little-endian Linux the
+    /// byte order in memory is BGRA, so we normalize to plain RGBA before
+    /// handing the texture to GTK.
     pub(super) fn from_qemu(cursor: QemuCursor) -> Result<Option<Self>> {
         let width = u32::try_from(cursor.width).context("negative guest cursor width")?;
         let height = u32::try_from(cursor.height).context("negative guest cursor height")?;
@@ -50,16 +51,16 @@ impl GuestCursor {
             height: cursor.height,
             hotspot_x: cursor.hot_x.clamp(0, max_hotspot_x),
             hotspot_y: cursor.hot_y.clamp(0, max_hotspot_y),
-            argb: cursor.data[..expected_len].to_vec(),
+            rgba: argb32_words_to_rgba(&cursor.data[..expected_len]),
         }))
     }
 
     fn to_gdk_cursor(&self) -> gdk::Cursor {
-        let bytes = glib::Bytes::from_owned(self.argb.clone());
+        let bytes = glib::Bytes::from_owned(self.rgba.clone());
         let texture = gdk::MemoryTexture::new(
             self.width,
             self.height,
-            gdk::MemoryFormat::A8r8g8b8,
+            gdk::MemoryFormat::R8g8b8a8,
             &bytes,
             self.stride(),
         );
@@ -70,6 +71,20 @@ impl GuestCursor {
     fn stride(&self) -> usize {
         usize::try_from(self.width).unwrap_or(0) * CURSOR_BYTES_PER_PIXEL
     }
+}
+
+fn argb32_words_to_rgba(src: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(src.len());
+
+    for pixel in src.chunks_exact(CURSOR_BYTES_PER_PIXEL) {
+        #[cfg(target_endian = "little")]
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+
+        #[cfg(target_endian = "big")]
+        rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], pixel[0]]);
+    }
+
+    rgba
 }
 
 pub(super) struct CursorState {
@@ -132,7 +147,7 @@ impl CursorState {
 
 #[cfg(test)]
 mod tests {
-    use super::GuestCursor;
+    use super::{GuestCursor, argb32_words_to_rgba};
     use qemu_display::Cursor as QemuCursor;
 
     #[test]
@@ -161,5 +176,23 @@ mod tests {
         .expect_err("short guest cursor payload should be rejected");
 
         assert!(error.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn argb32_black_stays_opaque_black() {
+        let rgba = argb32_words_to_rgba(&[0x00, 0x00, 0x00, 0xff]);
+
+        assert_eq!(rgba, vec![0x00, 0x00, 0x00, 0xff]);
+    }
+
+    #[test]
+    fn argb32_color_channels_are_swizzled_to_rgba() {
+        let rgba = argb32_words_to_rgba(&[0x12, 0x34, 0x56, 0x78]);
+
+        #[cfg(target_endian = "little")]
+        assert_eq!(rgba, vec![0x56, 0x34, 0x12, 0x78]);
+
+        #[cfg(target_endian = "big")]
+        assert_eq!(rgba, vec![0x34, 0x56, 0x78, 0x12]);
     }
 }
