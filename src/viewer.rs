@@ -48,6 +48,7 @@ const PIXMAN_R8G8B8X8: u32 = pixman_format_code_t_PIXMAN_r8g8b8x8;
 const PIXMAN_X8B8G8R8: u32 = pixman_format_code_t_PIXMAN_x8b8g8r8;
 const PIXMAN_X8R8G8B8: u32 = pixman_format_code_t_PIXMAN_x8r8g8b8;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
+const APP_ICON_PNG: &[u8] = include_bytes!("../logo.png");
 
 pub fn connect(target: ConnectTarget) -> Result<()> {
     let (event_tx, event_rx) = std_mpsc::channel();
@@ -184,6 +185,7 @@ fn run_window(
 
     let main_loop = glib::MainLoop::new(None, false);
     let (window_width, window_height) = suggested_window_size(ready.width, ready.height);
+    let app_icon = load_app_icon().ok();
 
     let picture = gtk::Picture::new();
     picture.set_hexpand(true);
@@ -212,6 +214,13 @@ fn run_window(
         .child(&container)
         .build();
     window.set_resizable(true);
+    if let Some(icon) = app_icon {
+        window.connect_realize(move |window| {
+            if let Err(error) = apply_window_icon(window, &icon) {
+                eprintln!("QD2 icon error: {error:#}");
+            }
+        });
+    }
 
     let ui_state = Rc::new(RefCell::new(UiState::default()));
     install_input_controllers(
@@ -453,6 +462,25 @@ fn run_window(
     window.present();
     picture.grab_focus();
     main_loop.run();
+    Ok(())
+}
+
+fn load_app_icon() -> Result<gdk::Texture> {
+    let bytes = glib::Bytes::from_static(APP_ICON_PNG);
+    gdk::Texture::from_bytes(&bytes).context("failed to decode embedded app icon")
+}
+
+fn apply_window_icon(window: &gtk::Window, icon: &gdk::Texture) -> Result<()> {
+    let native = window
+        .native()
+        .context("GTK window does not expose a native surface yet")?;
+    let surface = native
+        .surface()
+        .context("GTK window does not have a GDK surface yet")?;
+    let toplevel = surface
+        .dynamic_cast_ref::<gdk::Toplevel>()
+        .context("GTK surface is not a toplevel window")?;
+    toplevel.set_icon_list(std::slice::from_ref(icon));
     Ok(())
 }
 
