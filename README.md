@@ -67,12 +67,61 @@ cargo run -- --verbose connect \
   --address "unix:path=<path_to_sock>"
 ```
 
+## 🧱 Install Requirements
+
+You can either download a prebuilt binary from the [GitHub Releases](https://github.com/thelicato/qd2/releases) page or build QD2 from source.
+
+Building from source currently requires:
+
+- Rust stable with Cargo
+- GTK4 development files
+- pixman development files
+- `pkg-config` or `pkgconf`
+
+Typical package names:
+
+- Debian/Ubuntu: `libgtk-4-dev`, `libpixman-1-dev`, `pkg-config`
+- macOS with Homebrew: `gtk4`, `pixman`, `pkgconf`
+
+Build from source with:
+
+```bash
+cargo build --release
+```
+
+## ⚙️ Runtime Requirements
+
+QD2 expects a QEMU VM exposed through `-display dbus`, either on the session bus or on a private D-Bus socket passed with `--address`.
+
+At runtime, the most important pieces are:
+
+- A QEMU build with D-Bus display support
+- A guest with a supported display device and an exported QEMU D-Bus console
+- Access to the D-Bus socket you want to connect to
+- A working desktop session for GTK4 rendering
+
+Some features have extra requirements:
+
+- Clipboard sync usually needs `-chardev qemu-vdagent,...,clipboard=on` and a `virtserialport` named `com.redhat.spice.0`
+- Audio playback works best when QD2 runs inside the same user session as PipeWire or PulseAudio
+- DMABUF scanout import is currently Linux-specific and depends on the host GTK stack and GPU/render node support
+- Private libvirt sockets often require ACLs or group membership if you want to run QD2 without `sudo`
+
 ## 🌍 Platform Notes
 
 - Release artifacts are produced for `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, and `aarch64-apple-darwin`.
 - `qd2 connect` currently targets Unix-style environments.
 - DMABUF import is currently available on Linux GTK builds.
 - Some host integrations, especially Wayland, PipeWire, and private libvirt sockets, depend on the runtime session and permissions you launch QD2 with.
+
+## ⚠️ Known Limitations
+
+- Linux is the most exercised platform today; macOS builds are produced, but are less battle-tested.
+- The viewer is currently Unix-oriented and does not target Windows.
+- DMABUF acceleration is Linux-only; other platforms fall back to software framebuffer updates.
+- Running QD2 under `sudo` can break desktop integrations like audio or clipboard unless the relevant user-session environment is preserved.
+- Some guest features depend on the VM configuration, not just QD2 itself; clipboard and audio both require the right QEMU-side wiring.
+- Support is focused on a single interactive viewer window per `connect` session rather than advanced management features like USB redirection or file transfer.
 
 ## 📦 Releases
 
@@ -111,3 +160,7 @@ Each release includes:
 
 - QEMU D-Bus display documentation: <https://www.qemu.org/docs/master/interop/dbus-display.html>
 - `qemu-display` Rust crate: <https://gitlab.com/marcandre.lureau/qemu-display>
+
+## 🪪 License
+
+*QD2* is released under the [GPL-3.0 LICENSE](./LICENSE)
