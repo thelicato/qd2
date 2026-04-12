@@ -109,7 +109,7 @@ Some features have extra requirements:
 
 ## 🌍 Platform Notes
 
-- Release artifacts are produced for `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, and `aarch64-apple-darwin`.
+- Release artifacts are produced for Linux and macOS on both `x86_64` and `arm64`.
 - `qd2 connect` currently targets Unix-style environments.
 - DMABUF import is currently available on Linux GTK builds.
 - Some host integrations, especially Wayland, PipeWire, and private libvirt sockets, depend on the runtime session and permissions you launch QD2 with.
@@ -129,7 +129,7 @@ Prebuilt binaries are published on the [GitHub Releases](https://github.com/thel
 
 Each release includes:
 
-- packaged binaries for every supported target
+- packaged binaries for Linux and macOS on both `x86_64` and `arm64`
 - release notes generated with `npx changelogithub`
 - a `SHA256SUMS.txt` file for checksum verification
 

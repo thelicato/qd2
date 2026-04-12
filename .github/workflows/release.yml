@@ -14,18 +14,24 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.asset_suffix }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - runner: macos-13
+            asset_suffix: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset_suffix: linux-arm64
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
+            asset_suffix: macos-x86_64
           - runner: macos-14
             target: aarch64-apple-darwin
+            asset_suffix: macos-arm64
 
     steps:
       - name: Checkout repository
@@ -64,7 +70,7 @@ jobs:
           set -euo pipefail
 
           version="${GITHUB_REF_NAME}"
-          package_dir="${BINARY_NAME}-${version}-${{ matrix.target }}"
+          package_dir="${BINARY_NAME}-${version}-${{ matrix.asset_suffix }}"
           mkdir -p "dist/${package_dir}"
 
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${package_dir}/"
