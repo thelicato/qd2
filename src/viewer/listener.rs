@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{Sender, SyncSender},
 };
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use qemu_display::{
@@ -13,6 +14,7 @@ use qemu_display::{ScanoutDMABUF, ScanoutMap, UpdateMap};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use zbus::{
     Connection,
+    proxy::CacheProperties,
     zvariant::{Fd, OwnedObjectPath},
 };
 
@@ -28,6 +30,7 @@ use super::{
 };
 
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
+const DISCONNECT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) fn run_listener_thread(
     target: ConnectTarget,
@@ -115,6 +118,7 @@ async fn listener_main(
     } else {
         MouseMode::Disabled
     };
+    let mut disconnect_probe = tokio::time::interval(DISCONNECT_POLL_INTERVAL);
 
     let _ = ready_tx.send(Ok(ViewerReady {
         title,
@@ -128,6 +132,11 @@ async fn listener_main(
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
+            _ = disconnect_probe.tick() => {
+                if console.check_alive().await.is_err() {
+                    break;
+                }
+            }
             maybe_input = input_rx.recv() => match maybe_input {
                 Some(input) => {
                     if let InputEvent::ClipboardHostChanged(selection, content) = &input {
@@ -212,6 +221,7 @@ impl RemoteConsole {
         let object_path =
             OwnedObjectPath::try_from(format!("/org/qemu/Display1/Console_{console_id}"))?;
         let proxy = ConsoleProxy::builder(connection)
+            .cache_properties(CacheProperties::No)
             .destination(owner.to_owned())?
             .path(object_path.clone())?
             .build()
@@ -224,6 +234,7 @@ impl RemoteConsole {
             .await
             .with_context(|| format!("failed to build the keyboard proxy for owner `{owner}`"))?;
         let mouse = MouseProxy::builder(connection)
+            .cache_properties(CacheProperties::No)
             .destination(owner.to_owned())?
             .path(object_path)?
             .build()
@@ -243,6 +254,14 @@ impl RemoteConsole {
             .is_absolute()
             .await
             .context("failed to query the mouse mode")
+    }
+
+    async fn check_alive(&self) -> Result<()> {
+        self.proxy
+            .label()
+            .await
+            .context("failed to reach the remote console")
+            .map(|_| ())
     }
 
     async fn handle_input(&self, input: InputEvent) -> Result<()> {

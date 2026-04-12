@@ -52,7 +52,7 @@ pub fn connect(target: ConnectTarget, hotkeys_spec: Option<&str>) -> Result<()> 
         .recv()
         .context("display listener thread ended before it reported startup state")??;
 
-    let ui_result = run_window(&target, &ready, event_rx, input_tx, hotkeys);
+    let ui_result = run_window(&ready, event_rx, input_tx, hotkeys);
 
     let _ = shutdown_tx.send(());
     join_handle
@@ -65,7 +65,6 @@ pub fn connect(target: ConnectTarget, hotkeys_spec: Option<&str>) -> Result<()> 
 /// Build the GTK window and keep it in sync with the latest framebuffer or
 /// DMABUF presentation coming from the listener thread.
 fn run_window(
-    target: &ConnectTarget,
     ready: &ViewerReady,
     event_rx: Receiver<ViewerEvent>,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
@@ -403,7 +402,6 @@ fn run_window(
         let ui_state = ui_state.clone();
         let mouse_mode = mouse_mode.clone();
         let window = window.clone();
-        let vm_name = target.vm_name.clone();
         let window_base_title = window_base_title.clone();
 
         move || {
@@ -599,13 +597,13 @@ fn run_window(
                 }
             }
 
-            if let Some(message) = latest_status {
-                status_label.set_label(&message);
-                status_label.set_visible(true);
+            if disconnected {
+                window.close();
+                return glib::ControlFlow::Break;
             }
 
-            if disconnected {
-                status_label.set_label(&format!("Disconnected from `{vm_name}`."));
+            if let Some(message) = latest_status {
+                status_label.set_label(&message);
                 status_label.set_visible(true);
             }
 
