@@ -18,9 +18,28 @@ const VIEWER_CSS: &str = r#"
 }
 
 .viewer-floating-controls button,
+.viewer-floating-controls menubutton > button {
+    min-width: 42px;
+    min-height: 42px;
+    padding: 0;
+    border-radius: 999px;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+}
+
 .viewer-floating-controls menubutton {
-    min-width: 34px;
-    min-height: 34px;
+    min-width: 42px;
+    min-height: 42px;
+}
+
+.viewer-floating-controls button:hover,
+.viewer-floating-controls button:active,
+.viewer-floating-controls button:checked,
+.viewer-floating-controls menubutton > button:hover,
+.viewer-floating-controls menubutton > button:active,
+.viewer-floating-controls menubutton > button:checked {
+    background: rgba(255, 255, 255, 0.1);
 }
 
 .viewer-title {
@@ -81,6 +100,9 @@ pub(super) fn build_viewer_controls(
         let button = gtk::Button::with_label(shortcut.label());
         button.set_halign(gtk::Align::Fill);
         button.add_css_class("flat");
+        button.set_can_focus(false);
+        button.set_focus_on_click(false);
+        button.set_receives_default(false);
         button.connect_clicked({
             let keyboard_popover = keyboard_popover.clone();
             let send_guest_shortcut = send_guest_shortcut.clone();
@@ -99,6 +121,9 @@ pub(super) fn build_viewer_controls(
     keyboard_menu_button.set_tooltip_text(Some("Send guest shortcut"));
     keyboard_menu_button.add_css_class("flat");
     keyboard_menu_button.add_css_class("circular");
+    keyboard_menu_button.set_can_focus(false);
+    keyboard_menu_button.set_focus_on_click(false);
+    keyboard_menu_button.set_receives_default(false);
     keyboard_menu_button.set_visible(keyboard_available);
     keyboard_menu_button.set_popover(Some(&keyboard_popover));
 
@@ -111,6 +136,9 @@ pub(super) fn build_viewer_controls(
     let screenshot_button = gtk::Button::with_label("Take Screenshot");
     screenshot_button.set_halign(gtk::Align::Fill);
     screenshot_button.add_css_class("flat");
+    screenshot_button.set_can_focus(false);
+    screenshot_button.set_focus_on_click(false);
+    screenshot_button.set_receives_default(false);
     screenshot_button.connect_clicked({
         let popover = popover.clone();
         let take_screenshot = take_screenshot.clone();
@@ -124,6 +152,9 @@ pub(super) fn build_viewer_controls(
     let shortcuts_button = gtk::Button::with_label("Keyboard Shortcuts");
     shortcuts_button.set_halign(gtk::Align::Fill);
     shortcuts_button.add_css_class("flat");
+    shortcuts_button.set_can_focus(false);
+    shortcuts_button.set_focus_on_click(false);
+    shortcuts_button.set_receives_default(false);
     shortcuts_button.connect_clicked({
         let popover = popover.clone();
         let window = window.clone();
@@ -138,6 +169,9 @@ pub(super) fn build_viewer_controls(
     let about_button = gtk::Button::with_label("About");
     about_button.set_halign(gtk::Align::Fill);
     about_button.add_css_class("flat");
+    about_button.set_can_focus(false);
+    about_button.set_focus_on_click(false);
+    about_button.set_receives_default(false);
     about_button.connect_clicked({
         let popover = popover.clone();
         let window = window.clone();
@@ -156,6 +190,9 @@ pub(super) fn build_viewer_controls(
     menu_button.set_tooltip_text(Some("More"));
     menu_button.add_css_class("flat");
     menu_button.add_css_class("circular");
+    menu_button.set_can_focus(false);
+    menu_button.set_focus_on_click(false);
+    menu_button.set_receives_default(false);
     menu_button.set_popover(Some(&popover));
 
     controls.append(&fullscreen_button);
