@@ -348,11 +348,6 @@ fn run_window(
                 return glib::Propagation::Stop;
             }
 
-            if window.is_fullscreen() && hotkeys.leave_fullscreen().matches(keyval, modifiers) {
-                window.unfullscreen();
-                return glib::Propagation::Stop;
-            }
-
             glib::Propagation::Proceed
         }
     });

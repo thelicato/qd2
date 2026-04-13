@@ -7,7 +7,6 @@ use gtk4 as gtk;
 #[derive(Clone, Debug)]
 pub(super) struct ViewerHotkeys {
     toggle_fullscreen: Hotkey,
-    leave_fullscreen: Hotkey,
     release_cursor: Hotkey,
     rotate_dmabuf_view: Hotkey,
     toggle_dmabuf_flip: Hotkey,
@@ -18,7 +17,6 @@ impl Default for ViewerHotkeys {
     fn default() -> Self {
         Self {
             toggle_fullscreen: Hotkey::key(gdk::Key::F11, gdk::ModifierType::empty()),
-            leave_fullscreen: Hotkey::key(gdk::Key::Escape, gdk::ModifierType::empty()),
             release_cursor: Hotkey::modifiers(
                 gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK,
             ),
@@ -79,10 +77,6 @@ impl ViewerHotkeys {
         &self.toggle_fullscreen
     }
 
-    pub(super) fn leave_fullscreen(&self) -> &Hotkey {
-        &self.leave_fullscreen
-    }
-
     pub(super) fn release_cursor(&self) -> &Hotkey {
         &self.release_cursor
     }
@@ -103,7 +97,6 @@ impl ViewerHotkeys {
         [
             ("Release keyboard and mouse", &self.release_cursor),
             ("Toggle fullscreen", &self.toggle_fullscreen),
-            ("Leave fullscreen", &self.leave_fullscreen),
             ("Rotate DMABUF view", &self.rotate_dmabuf_view),
             ("Toggle DMABUF vertical flip", &self.toggle_dmabuf_flip),
             ("Reset DMABUF transform", &self.reset_dmabuf_transform),
@@ -116,14 +109,13 @@ impl ViewerHotkeys {
     fn set_binding(&mut self, action: &str, binding: Hotkey) -> Result<()> {
         match action {
             "toggle-fullscreen" => self.toggle_fullscreen = binding,
-            "leave-fullscreen" => self.leave_fullscreen = binding,
             "release-cursor" | "release-grab" => self.release_cursor = binding,
             "rotate-dmabuf-view" => self.rotate_dmabuf_view = binding,
             "toggle-dmabuf-flip" => self.toggle_dmabuf_flip = binding,
             "reset-dmabuf-transform" => self.reset_dmabuf_transform = binding,
             _ => bail!(
                 "unknown hotkey action `{action}`; supported actions are: \
-toggle-fullscreen, leave-fullscreen, release-cursor, rotate-dmabuf-view, \
+toggle-fullscreen, release-cursor, rotate-dmabuf-view, \
 toggle-dmabuf-flip, reset-dmabuf-transform"
             ),
         }
@@ -135,7 +127,6 @@ toggle-dmabuf-flip, reset-dmabuf-transform"
         let mut seen = HashMap::new();
         for (action, binding) in [
             ("toggle-fullscreen", &self.toggle_fullscreen),
-            ("leave-fullscreen", &self.leave_fullscreen),
             ("release-cursor", &self.release_cursor),
             ("rotate-dmabuf-view", &self.rotate_dmabuf_view),
             ("toggle-dmabuf-flip", &self.toggle_dmabuf_flip),
@@ -433,10 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn disabled_binding_is_hidden_from_shortcuts_dialog() -> Result<()> {
-        let hotkeys = ViewerHotkeys::parse(Some("leave-fullscreen=off"))?;
+    fn fullscreen_shortcuts_dialog_only_lists_toggle_action() -> Result<()> {
+        let hotkeys = ViewerHotkeys::parse(Some("toggle-fullscreen=ctrl+enter"))?;
         let shortcuts = hotkeys.shortcuts_for_dialog();
 
+        assert!(
+            shortcuts
+                .iter()
+                .any(|(title, _)| *title == "Toggle fullscreen")
+        );
         assert!(
             !shortcuts
                 .iter()
@@ -448,7 +444,7 @@ mod tests {
 
     #[test]
     fn duplicate_bindings_are_rejected() {
-        let error = ViewerHotkeys::parse(Some("toggle-fullscreen=f11,leave-fullscreen=f11"))
+        let error = ViewerHotkeys::parse(Some("toggle-fullscreen=f11,release-cursor=f11"))
             .expect_err("conflicting bindings should be rejected");
 
         assert!(error.to_string().contains("hotkey conflict"));

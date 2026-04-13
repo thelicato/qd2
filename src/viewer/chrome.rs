@@ -152,7 +152,26 @@ fn show_about_dialog(window: &gtk::Window, app_icon: Option<gdk::Texture>) {
     if let Some(icon) = app_icon.as_ref() {
         about.set_logo(Some(icon));
     }
+    about.connect_map(|dialog| disable_text_selection(dialog.upcast_ref()));
     about.present();
+}
+
+fn disable_text_selection(widget: &gtk::Widget) {
+    if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+        label.set_selectable(false);
+    }
+
+    if let Ok(text_view) = widget.clone().downcast::<gtk::TextView>() {
+        text_view.set_editable(false);
+        text_view.set_cursor_visible(false);
+        text_view.set_focusable(false);
+    }
+
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        disable_text_selection(&current);
+        child = current.next_sibling();
+    }
 }
 
 pub(super) fn toggle_fullscreen(window: &gtk::Window) {
@@ -166,11 +185,10 @@ pub(super) fn toggle_fullscreen(window: &gtk::Window) {
 fn update_fullscreen_button(button: &gtk::Button, is_fullscreen: bool) {
     if is_fullscreen {
         button.set_icon_name("view-restore-symbolic");
-        button.set_tooltip_text(Some("Leave fullscreen"));
     } else {
         button.set_icon_name("view-fullscreen-symbolic");
-        button.set_tooltip_text(Some("Fullscreen"));
     }
+    button.set_tooltip_text(Some("Toggle fullscreen"));
 }
 
 fn cancel_fullscreen_bar_hide(state: &Rc<RefCell<FullscreenChromeState>>) {
