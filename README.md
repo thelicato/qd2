@@ -143,7 +143,12 @@ Bug reports and pull requests are welcome.
 | `cli.rs` | Defines the command-line interface, subcommands, and flags. |
 | `diagnostics.rs` | Implements `doctor`, verbose logging, and host-side environment checks. |
 | `main.rs` | Wires the CLI to discovery, inspection, diagnostics, and the viewer entry point. |
-| `qemu.rs` | Handles QEMU D-Bus discovery, inspection, VM selection, and connection setup. |
+| `qemu/mod.rs` | Re-exports the QEMU D-Bus domain API from smaller discovery, inspection, and warning modules. |
+| `qemu/discovery.rs` | Discovers QEMU D-Bus VMs, opens connections, and scans libvirt socket locations. |
+| `qemu/inspection.rs` | Builds inspection reports and resolves the final console connection target. |
+| `qemu/selection.rs` | Selects VMs and consoles from discovery results and formats selection errors. |
+| `qemu/types.rs` | Defines the shared QEMU discovery, inspection, and connect-target data structures. |
+| `qemu/warnings.rs` | Derives clipboard/audio inspection warnings from exported QEMU objects. |
 | `viewer/mod.rs` | Orchestrates the GTK4 viewer window, event loop, and presentation updates. |
 | `viewer/audio.rs` | Registers QEMU audio listeners and forwards guest playback to host audio backends. |
 | `viewer/chrome.rs` | Builds the titlebar, fullscreen controls, shortcuts dialog, and about dialog. |
@@ -155,7 +160,10 @@ Bug reports and pull requests are welcome.
 | `viewer/grab.rs` | Manages keyboard and mouse capture, release, and cursor grabbing behavior. |
 | `viewer/hotkeys.rs` | Parses configurable hotkey definitions and matches them at runtime. |
 | `viewer/keyboard.rs` | Translates GTK key events into QEMU qnum keycodes and forwards them to the guest. |
-| `viewer/listener.rs` | Runs the async D-Bus listener thread, input forwarding, and reconnect supervision. |
+| `viewer/listener/mod.rs` | Supervises the background listener thread and reconnect loop. |
+| `viewer/listener/reconnect.rs` | Holds reconnect timing, status messaging, and reconnect-plan helpers. |
+| `viewer/listener/remote.rs` | Talks to the remote QEMU console and exports the local D-Bus listener objects. |
+| `viewer/listener/session.rs` | Runs one connected console session, including input, clipboard, audio, and liveness handling. |
 | `viewer/mouse.rs` | Maps widget coordinates and pointer events into guest mouse actions. |
 | `viewer/utils.rs` | Holds shared viewer helpers for sizing, icons, and small GTK utilities. |
 
