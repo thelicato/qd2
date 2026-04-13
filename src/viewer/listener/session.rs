@@ -25,7 +25,7 @@ pub(super) enum SessionOutcome {
 pub(super) async fn listener_session(
     target: ConnectTarget,
     event_tx: &Sender<ViewerEvent>,
-    ready_tx: Option<&SyncSender<Result<ViewerReady>>>,
+    ready_tx: &SyncSender<Result<ViewerReady>>,
     input_rx: &mut tokio_mpsc::UnboundedReceiver<InputEvent>,
     shutdown_rx: &mut oneshot::Receiver<()>,
 ) -> Result<SessionOutcome> {
@@ -91,18 +91,7 @@ pub(super) async fn listener_session(
         clipboard_available: clipboard.is_some(),
         mouse_mode,
     };
-    match ready_tx {
-        Some(ready_tx) => {
-            let _ = ready_tx.send(Ok(ready));
-        }
-        None => {
-            let _ = event_tx.send(ViewerEvent::MouseModeChanged(mouse_mode));
-            let _ = event_tx.send(ViewerEvent::Status(format!(
-                "Reconnected to `{}`. Waiting for the guest display...",
-                target.vm_name
-            )));
-        }
-    }
+    let _ = ready_tx.send(Ok(ready));
 
     loop {
         tokio::select! {

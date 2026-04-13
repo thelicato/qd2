@@ -34,7 +34,6 @@ pub struct ConnectTarget {
     pub source_address: Option<String>,
     pub owner: String,
     pub vm_name: String,
-    pub vm_uuid: String,
     pub console_id: u32,
     pub width: u32,
     pub height: u32,

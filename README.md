@@ -11,7 +11,7 @@
   <code>list</code> • <code>inspect</code> • <code>doctor</code> • <code>connect</code> • <code>version</code>
 </p>
 
-QD2 is built for people who want the flexibility of QEMU's D-Bus display stack without giving up a polished desktop viewer. It combines a CLI that is useful for scripting and debugging with a GTK4 frontend that handles real-world VM workflows like framebuffer rendering, DMABUF scanouts, input grab, clipboard sync, audio playback, reconnects, and diagnostics.
+QD2 is built for people who want the flexibility of QEMU's D-Bus display stack without giving up a polished desktop viewer. It combines a CLI that is useful for scripting and debugging with a GTK4 frontend that handles real-world VM workflows like framebuffer rendering, DMABUF scanouts, input grab, clipboard sync, audio playback, and diagnostics.
 
 ## ✨ Why QD2
 
@@ -50,7 +50,6 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Floating fullscreen controls inspired by virt-viewer.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
 - A VM chooser for the multi-VM `connect` flow.
-- Reconnect handling when the listener drops or the VM restarts.
 
 ## 🧱 Install Requirements
 
@@ -160,10 +159,9 @@ Bug reports and pull requests are welcome.
 | `viewer/grab.rs` | Manages keyboard and mouse capture, release, and cursor grabbing behavior. |
 | `viewer/hotkeys.rs` | Parses configurable hotkey definitions and matches them at runtime. |
 | `viewer/keyboard.rs` | Translates GTK key events into QEMU qnum keycodes and forwards them to the guest. |
-| `viewer/listener/mod.rs` | Supervises the background listener thread and reconnect loop. |
-| `viewer/listener/reconnect.rs` | Holds reconnect timing, status messaging, and reconnect-plan helpers. |
+| `viewer/listener/mod.rs` | Supervises the background listener thread and the lifetime of one viewer session. |
 | `viewer/listener/remote.rs` | Talks to the remote QEMU console and exports the local D-Bus listener objects. |
-| `viewer/listener/session.rs` | Runs one connected console session, including input, clipboard, audio, and liveness handling. |
+| `viewer/listener/session.rs` | Runs one connected console session, including input, clipboard, audio, and disconnect handling. |
 | `viewer/mouse.rs` | Maps widget coordinates and pointer events into guest mouse actions. |
 | `viewer/utils.rs` | Holds shared viewer helpers for sizing, icons, and small GTK utilities. |
 

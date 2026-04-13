@@ -132,16 +132,9 @@ pub fn connect(
         .name("qd2-display-listener".to_owned())
         .spawn({
             let target = target.clone();
-            let requested_address = requested_address.map(str::to_owned);
             move || {
-                listener::run_listener_thread(
-                    target,
-                    requested_address,
-                    event_tx,
-                    ready_tx,
-                    input_rx,
-                    shutdown_rx,
-                )
+                let _ = requested_address;
+                listener::run_listener_thread(target, event_tx, ready_tx, input_rx, shutdown_rx)
             }
         })
         .context("failed to spawn the QEMU display listener thread")?;
@@ -705,10 +698,8 @@ fn run_window(
                     ui_state.borrow_mut().last_pointer_guest_position = None;
                     grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
                 }
-                if latest_status.is_none() {
-                    latest_status =
-                        Some("Connection to the VM was lost. Waiting to reconnect...".to_owned());
-                }
+                window.close();
+                return glib::ControlFlow::Break;
             }
 
             if let Some(message) = latest_status {

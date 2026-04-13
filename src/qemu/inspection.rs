@@ -95,7 +95,6 @@ pub async fn resolve_connect_target(
         source_address: report.vm.source_address.clone(),
         owner: report.vm.owner.as_str().to_owned(),
         vm_name: report.vm.name.clone(),
-        vm_uuid: report.vm.uuid.clone(),
         console_id: console.id,
         width: console.width,
         height: console.height,
