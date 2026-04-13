@@ -38,7 +38,7 @@ body:
     attributes:
       label: QD2 version
       description: Tag, release version, or commit SHA
-      placeholder: v0.1.0
+      placeholder: v0.1.1
     validations:
       required: true
 

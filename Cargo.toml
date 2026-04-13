@@ -1,6 +1,6 @@
 [package]
 name = "qd2"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "QEMU D-Bus Display viewer and diagnostics tool"
 license = "GPL-3.0-only"
