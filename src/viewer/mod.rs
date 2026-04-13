@@ -36,6 +36,85 @@ pub fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
     chooser::choose_vm(vms)
 }
 
+pub fn show_connect_error(summary: &str, detail: &str) -> Result<()> {
+    gtk::init().context("failed to initialize GTK4 for the error dialog")?;
+
+    let main_loop = glib::MainLoop::new(None, false);
+    let app_icon = utils::load_app_icon().ok();
+
+    let logo = app_icon.as_ref().map(|icon| {
+        let image = gtk::Image::from_paintable(Some(icon));
+        image.set_halign(gtk::Align::Center);
+        image.set_pixel_size(120);
+        image
+    });
+
+    let summary_label = gtk::Label::new(Some(summary));
+    summary_label.set_wrap(true);
+    summary_label.set_justify(gtk::Justification::Center);
+    summary_label.set_xalign(0.5);
+    summary_label.add_css_class("title-3");
+
+    let detail_label = gtk::Label::new(Some(detail));
+    detail_label.set_wrap(true);
+    detail_label.set_justify(gtk::Justification::Center);
+    detail_label.set_xalign(0.5);
+    detail_label.add_css_class("dim-label");
+
+    let close_button = gtk::Button::with_label("Close");
+    close_button.add_css_class("suggested-action");
+    close_button.set_halign(gtk::Align::Center);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    content.set_margin_top(32);
+    content.set_margin_bottom(24);
+    content.set_margin_start(28);
+    content.set_margin_end(28);
+    if let Some(logo) = logo.as_ref() {
+        content.append(logo);
+    }
+    content.append(&summary_label);
+    content.append(&detail_label);
+    content.append(&close_button);
+
+    let window = gtk::Window::builder()
+        .title("QD2")
+        .modal(true)
+        .resizable(false)
+        .default_width(460)
+        .child(&content)
+        .build();
+    if let Some(icon) = app_icon.clone() {
+        window.connect_realize(move |window| {
+            if let Err(error) = utils::apply_window_icon(window, &icon) {
+                eprintln!("QD2 icon error: {error:#}");
+            }
+        });
+    }
+
+    close_button.connect_clicked({
+        let main_loop = main_loop.clone();
+        let window = window.clone();
+        move |_| {
+            window.close();
+            main_loop.quit();
+        }
+    });
+
+    window.connect_close_request({
+        let main_loop = main_loop.clone();
+        move |_| {
+            main_loop.quit();
+            glib::Propagation::Proceed
+        }
+    });
+
+    window.present();
+    main_loop.run();
+
+    Ok(())
+}
+
 /// Start the GTK viewer and the background listener that mirrors the QEMU display stream.
 pub fn connect(
     target: ConnectTarget,

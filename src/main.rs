@@ -3,10 +3,10 @@ mod diagnostics;
 mod qemu;
 mod viewer;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, ConnectArgs};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,28 +29,10 @@ async fn main() -> Result<()> {
             print_doctor(&report);
         }
         Command::Connect(args) => {
-            let target = if let Some(selector) = args.vm.as_deref() {
-                qemu::resolve_connect_target(args.address(), Some(selector), args.console).await?
-            } else {
-                let discovery = qemu::discover(args.address()).await?;
-
-                match discovery.vms.as_slice() {
-                    [] => qemu::resolve_connect_target(args.address(), None, args.console).await?,
-                    [vm] => {
-                        qemu::resolve_connect_target(args.address(), Some(&vm.uuid), args.console)
-                            .await?
-                    }
-                    _ => {
-                        let Some(vm) = viewer::choose_vm(&discovery.vms)? else {
-                            return Ok(());
-                        };
-                        qemu::resolve_connect_target(args.address(), Some(&vm.uuid), args.console)
-                            .await?
-                    }
-                }
+            if let Err(error) = run_connect_command(args).await {
+                report_connect_error(&error);
+                return Err(error);
             };
-            print_warnings(&target.warnings);
-            viewer::connect(target, args.address(), args.hotkeys.as_deref())?;
         }
         Command::Version => {
             println!("qd2 {}", env!("CARGO_PKG_VERSION"));
@@ -58,6 +40,49 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_connect_command(args: ConnectArgs) -> Result<()> {
+    let target = if let Some(selector) = args.vm.as_deref() {
+        qemu::resolve_connect_target(args.address(), Some(selector), args.console).await?
+    } else {
+        let discovery = qemu::discover(args.address()).await?;
+
+        match discovery.vms.as_slice() {
+            [] => qemu::resolve_connect_target(args.address(), None, args.console).await?,
+            [vm] => {
+                qemu::resolve_connect_target(args.address(), Some(&vm.uuid), args.console).await?
+            }
+            _ => {
+                let Some(vm) = viewer::choose_vm(&discovery.vms)? else {
+                    return Ok(());
+                };
+                qemu::resolve_connect_target(args.address(), Some(&vm.uuid), args.console).await?
+            }
+        }
+    };
+    print_warnings(&target.warnings);
+    viewer::connect(target, args.address(), args.hotkeys.as_deref())
+}
+
+fn report_connect_error(error: &Error) {
+    if let Err(dialog_error) =
+        viewer::show_connect_error(connect_error_summary(error), &format!("{error:#}"))
+    {
+        eprintln!(
+            "QD2 connect failed:\n{error:#}\n\nAdditionally, QD2 could not show the error window:\n{dialog_error:#}"
+        );
+    }
+}
+
+fn connect_error_summary(error: &Error) -> &'static str {
+    let message = error.to_string();
+
+    if message.starts_with("no QEMU D-Bus VMs found") {
+        "No QEMU VMs Found"
+    } else {
+        "Could Not Open QD2"
+    }
 }
 
 fn print_vm_list(discovery: &qemu::Discovery) {
@@ -191,5 +216,24 @@ fn print_doctor_check(check: &diagnostics::DoctorCheck) {
 
     for line in lines {
         println!("      {line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::connect_error_summary;
+
+    #[test]
+    fn connect_error_summary_mentions_missing_vms() {
+        let error = anyhow!("no QEMU D-Bus VMs found on the session bus");
+        assert_eq!(connect_error_summary(&error), "No QEMU VMs Found");
+    }
+
+    #[test]
+    fn connect_error_summary_uses_generic_fallback() {
+        let error = anyhow!("failed to initialize GTK4");
+        assert_eq!(connect_error_summary(&error), "Could Not Open QD2");
     }
 }
