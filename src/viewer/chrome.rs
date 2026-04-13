@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 
-use super::hotkeys::ViewerHotkeys;
+use super::{hotkeys::ViewerHotkeys, keyboard::GuestShortcut};
 
 const FULLSCREEN_HOVER_HIDE_DELAY: Duration = Duration::from_millis(900);
 const VIEWER_CSS: &str = r#"
@@ -56,6 +56,9 @@ pub(super) fn build_viewer_controls(
     window: &gtk::Window,
     app_icon: Option<&gdk::Texture>,
     hotkeys: ViewerHotkeys,
+    keyboard_available: bool,
+    take_screenshot: Rc<dyn Fn()>,
+    send_guest_shortcut: Rc<dyn Fn(GuestShortcut)>,
 ) -> (gtk::Box, gtk::Button) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let hotkeys = Rc::new(hotkeys);
@@ -69,13 +72,56 @@ pub(super) fn build_viewer_controls(
         move |_| toggle_fullscreen(&window)
     });
 
+    let keyboard_popover = gtk::Popover::new();
+    keyboard_popover.set_has_arrow(false);
+    keyboard_popover.add_css_class("viewer-popover");
+
+    let keyboard_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    for shortcut in GuestShortcut::all() {
+        let button = gtk::Button::with_label(shortcut.label());
+        button.set_halign(gtk::Align::Fill);
+        button.add_css_class("flat");
+        button.connect_clicked({
+            let keyboard_popover = keyboard_popover.clone();
+            let send_guest_shortcut = send_guest_shortcut.clone();
+            let shortcut = *shortcut;
+            move |_| {
+                keyboard_popover.popdown();
+                send_guest_shortcut(shortcut);
+            }
+        });
+        keyboard_popover_box.append(&button);
+    }
+    keyboard_popover.set_child(Some(&keyboard_popover_box));
+
+    let keyboard_menu_button = gtk::MenuButton::new();
+    keyboard_menu_button.set_icon_name("input-keyboard-symbolic");
+    keyboard_menu_button.set_tooltip_text(Some("Send guest shortcut"));
+    keyboard_menu_button.add_css_class("flat");
+    keyboard_menu_button.add_css_class("circular");
+    keyboard_menu_button.set_visible(keyboard_available);
+    keyboard_menu_button.set_popover(Some(&keyboard_popover));
+
     let popover = gtk::Popover::new();
     popover.set_has_arrow(false);
     popover.add_css_class("viewer-popover");
 
     let popover_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
 
-    let shortcuts_button = gtk::Button::with_label("Keyboard shortcuts");
+    let screenshot_button = gtk::Button::with_label("Take Screenshot");
+    screenshot_button.set_halign(gtk::Align::Fill);
+    screenshot_button.add_css_class("flat");
+    screenshot_button.connect_clicked({
+        let popover = popover.clone();
+        let take_screenshot = take_screenshot.clone();
+        move |_| {
+            popover.popdown();
+            take_screenshot();
+        }
+    });
+    popover_box.append(&screenshot_button);
+
+    let shortcuts_button = gtk::Button::with_label("Keyboard Shortcuts");
     shortcuts_button.set_halign(gtk::Align::Fill);
     shortcuts_button.add_css_class("flat");
     shortcuts_button.connect_clicked({
@@ -113,6 +159,7 @@ pub(super) fn build_viewer_controls(
     menu_button.set_popover(Some(&popover));
 
     controls.append(&fullscreen_button);
+    controls.append(&keyboard_menu_button);
     controls.append(&menu_button);
 
     (controls, fullscreen_button)

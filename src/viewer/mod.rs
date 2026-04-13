@@ -225,10 +225,38 @@ fn run_window(
     let title_label = gtk::Label::new(Some(&ready.title));
     title_label.add_css_class("viewer-title");
 
+    let ui_state = Rc::new(RefCell::new(UiState::default()));
     let hotkeys = Rc::new(hotkeys);
+    let screenshot_action: Rc<dyn Fn()> = Rc::new({
+        let window = window.clone();
+        let picture = picture.clone();
+        let ui_state = ui_state.clone();
+        move || match take_screenshot_to_clipboard(&window, &picture, &ui_state) {
+            Ok(()) => {
+                picture.grab_focus();
+            }
+            Err(error) => {
+                show_action_error(&window, "Could not take screenshot", &error.to_string())
+            }
+        }
+    });
+    let guest_shortcut_action: Rc<dyn Fn(keyboard::GuestShortcut)> = Rc::new({
+        let input_tx = input_tx.clone();
+        let picture = picture.clone();
+        move |shortcut| {
+            keyboard::send_guest_shortcut(&input_tx, shortcut);
+            picture.grab_focus();
+        }
+    });
 
-    let (titlebar_controls, titlebar_fullscreen_button) =
-        chrome::build_viewer_controls(&window, app_icon.as_ref(), hotkeys.as_ref().clone());
+    let (titlebar_controls, titlebar_fullscreen_button) = chrome::build_viewer_controls(
+        &window,
+        app_icon.as_ref(),
+        hotkeys.as_ref().clone(),
+        ready.keyboard_available,
+        screenshot_action.clone(),
+        guest_shortcut_action.clone(),
+    );
     let header_bar = gtk::HeaderBar::new();
     header_bar.set_show_title_buttons(true);
     header_bar.set_title_widget(Some(&title_label));
@@ -237,8 +265,14 @@ fn run_window(
         window.set_titlebar(Some(&header_bar));
     }
 
-    let (floating_controls, overlay_fullscreen_button) =
-        chrome::build_viewer_controls(&window, app_icon.as_ref(), hotkeys.as_ref().clone());
+    let (floating_controls, overlay_fullscreen_button) = chrome::build_viewer_controls(
+        &window,
+        app_icon.as_ref(),
+        hotkeys.as_ref().clone(),
+        ready.keyboard_available,
+        screenshot_action,
+        guest_shortcut_action,
+    );
     floating_controls.add_css_class("viewer-floating-controls");
 
     let fullscreen_revealer = gtk::Revealer::builder()
@@ -353,7 +387,6 @@ fn run_window(
     });
     picture.add_controller(viewer_shortcuts);
 
-    let ui_state = Rc::new(RefCell::new(UiState::default()));
     let clipboard_state = Rc::new(RefCell::new(clipboard::ClipboardUiState::default()));
     let cursor_state = Rc::new(RefCell::new(cursor::CursorState::default()));
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
@@ -824,6 +857,45 @@ fn present_paintable(
     ui_state.frame_size = Some((width, height));
 
     window.set_title(Some(&format!("{window_base_title} - {width}x{height}")));
+}
+
+fn take_screenshot_to_clipboard(
+    window: &gtk::Window,
+    picture: &gtk::Picture,
+    ui_state: &Rc<RefCell<UiState>>,
+) -> Result<()> {
+    let (width, height) = ui_state
+        .borrow()
+        .frame_size
+        .context("No display output is currently available")?;
+    let paintable = picture
+        .paintable()
+        .context("No display output is currently available")?;
+    let renderer = window
+        .renderer()
+        .context("GTK could not access a renderer for screenshot capture")?;
+
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+    let node = snapshot
+        .to_node()
+        .context("GTK failed to snapshot the current guest display")?;
+    let viewport = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+    let texture = renderer.render_texture(&node, Some(&viewport));
+    window.clipboard().set_texture(&texture);
+    Ok(())
+}
+
+fn show_action_error(window: &gtk::Window, message: &str, detail: &str) {
+    let dialog = gtk::AlertDialog::builder()
+        .modal(true)
+        .message(message)
+        .detail(detail)
+        .buttons(["Close"])
+        .default_button(0)
+        .cancel_button(0)
+        .build();
+    dialog.choose(Some(window), None::<&gtk::gio::Cancellable>, |_| {});
 }
 
 struct ViewerReady {

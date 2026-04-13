@@ -12,6 +12,71 @@ pub(super) struct KeyboardControllerHandle {
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum GuestShortcut {
+    CtrlAltBackspace,
+    CtrlAltDelete,
+    CtrlAltF1,
+    CtrlAltF2,
+    CtrlAltF3,
+    CtrlAltF4,
+    CtrlAltF5,
+    CtrlAltF6,
+    CtrlAltF7,
+    CtrlAltF8,
+    CtrlAltF9,
+}
+
+impl GuestShortcut {
+    pub(super) fn all() -> &'static [Self] {
+        &[
+            Self::CtrlAltBackspace,
+            Self::CtrlAltDelete,
+            Self::CtrlAltF1,
+            Self::CtrlAltF2,
+            Self::CtrlAltF3,
+            Self::CtrlAltF4,
+            Self::CtrlAltF5,
+            Self::CtrlAltF6,
+            Self::CtrlAltF7,
+            Self::CtrlAltF8,
+            Self::CtrlAltF9,
+        ]
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::CtrlAltBackspace => "Ctrl + Alt + BackSpace",
+            Self::CtrlAltDelete => "Ctrl + Alt + Delete",
+            Self::CtrlAltF1 => "Ctrl + Alt + F1",
+            Self::CtrlAltF2 => "Ctrl + Alt + F2",
+            Self::CtrlAltF3 => "Ctrl + Alt + F3",
+            Self::CtrlAltF4 => "Ctrl + Alt + F4",
+            Self::CtrlAltF5 => "Ctrl + Alt + F5",
+            Self::CtrlAltF6 => "Ctrl + Alt + F6",
+            Self::CtrlAltF7 => "Ctrl + Alt + F7",
+            Self::CtrlAltF8 => "Ctrl + Alt + F8",
+            Self::CtrlAltF9 => "Ctrl + Alt + F9",
+        }
+    }
+
+    fn qnums(self) -> &'static [u32] {
+        match self {
+            Self::CtrlAltBackspace => &[29, 56, 14],
+            Self::CtrlAltDelete => &[29, 56, 211],
+            Self::CtrlAltF1 => &[29, 56, 59],
+            Self::CtrlAltF2 => &[29, 56, 60],
+            Self::CtrlAltF3 => &[29, 56, 61],
+            Self::CtrlAltF4 => &[29, 56, 62],
+            Self::CtrlAltF5 => &[29, 56, 63],
+            Self::CtrlAltF6 => &[29, 56, 64],
+            Self::CtrlAltF7 => &[29, 56, 65],
+            Self::CtrlAltF8 => &[29, 56, 66],
+            Self::CtrlAltF9 => &[29, 56, 67],
+        }
+    }
+}
+
 impl KeyboardControllerHandle {
     pub(super) fn force_release(&self) {
         self.state.borrow_mut().release_all(&self.input_tx);
@@ -79,6 +144,19 @@ pub(super) fn install_keyboard_controller(
     picture.add_controller(key_controller);
 
     KeyboardControllerHandle { state, input_tx }
+}
+
+pub(super) fn send_guest_shortcut(
+    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+    shortcut: GuestShortcut,
+) {
+    for &qnum in shortcut.qnums() {
+        let _ = input_tx.send(InputEvent::KeyPress(qnum));
+    }
+
+    for &qnum in shortcut.qnums().iter().rev() {
+        let _ = input_tx.send(InputEvent::KeyRelease(qnum));
+    }
 }
 
 #[derive(Default)]
@@ -278,7 +356,7 @@ mod tests {
     use gtk4 as gtk;
     use tokio::sync::mpsc as tokio_mpsc;
 
-    use super::{PressedKeyState, linux_keycode_to_qnum};
+    use super::{GuestShortcut, PressedKeyState, linux_keycode_to_qnum, send_guest_shortcut};
     use crate::viewer::hotkeys::ViewerHotkeys;
 
     #[test]
@@ -330,5 +408,37 @@ mod tests {
         assert!(state.take_suppressed_release(29));
         assert!(state.take_suppressed_release(56));
         assert!(!state.take_suppressed_release(29));
+    }
+
+    #[test]
+    fn guest_shortcut_sends_press_and_reverse_release_sequence() {
+        let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
+
+        send_guest_shortcut(&input_tx, GuestShortcut::CtrlAltDelete);
+
+        assert_eq!(
+            input_rx.try_recv().ok(),
+            Some(super::InputEvent::KeyPress(29))
+        );
+        assert_eq!(
+            input_rx.try_recv().ok(),
+            Some(super::InputEvent::KeyPress(56))
+        );
+        assert_eq!(
+            input_rx.try_recv().ok(),
+            Some(super::InputEvent::KeyPress(211))
+        );
+        assert_eq!(
+            input_rx.try_recv().ok(),
+            Some(super::InputEvent::KeyRelease(211))
+        );
+        assert_eq!(
+            input_rx.try_recv().ok(),
+            Some(super::InputEvent::KeyRelease(56))
+        );
+        assert_eq!(
+            input_rx.try_recv().ok(),
+            Some(super::InputEvent::KeyRelease(29))
+        );
     }
 }

@@ -18,7 +18,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Discover QEMU D-Bus VMs on the session bus and common libvirt private socket locations.
 - Inspect consoles, exported interfaces, chardevs, clipboard exposure, and audio exposure.
 - Diagnose common host and guest setup problems with `qd2 doctor`.
-- Connect to a console with GTK4, keyboard and mouse forwarding, guest cursor updates, fullscreen controls, audio, and clipboard integration.
+- Connect to a console with GTK4, keyboard and mouse forwarding, guest cursor updates, fullscreen controls, guest shortcut injection, screenshots, audio, and clipboard integration.
 - Recover more gracefully from disconnects and VM restarts instead of failing silently.
 - Tune the viewer with custom hotkeys and targeted runtime diagnostics.
 
@@ -52,6 +52,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Floating fullscreen controls inspired by virt-viewer.
 - Direct fullscreen launch with `qd2 connect --fullscreen`.
 - Optional undecorated launch mode for tiling compositor workflows.
+- Top-bar actions for taking screenshots and sending guest shortcuts like `Ctrl+Alt+Delete`.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
 - A VM chooser for the multi-VM `connect` flow.
 
