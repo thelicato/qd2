@@ -61,6 +61,12 @@ pub(super) struct FullscreenChromeState {
     hide_source: Option<glib::SourceId>,
 }
 
+pub(super) struct ViewerControls {
+    pub(super) container: gtk::Box,
+    pub(super) fullscreen_button: gtk::Button,
+    pub(super) menu_buttons: Vec<gtk::MenuButton>,
+}
+
 pub(super) fn install_viewer_css(display: &gdk::Display) {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(VIEWER_CSS);
@@ -78,7 +84,7 @@ pub(super) fn build_viewer_controls(
     keyboard_available: bool,
     take_screenshot: Rc<dyn Fn()>,
     send_guest_shortcut: Rc<dyn Fn(GuestShortcut)>,
-) -> (gtk::Box, gtk::Button) {
+) -> ViewerControls {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let hotkeys = Rc::new(hotkeys);
 
@@ -199,7 +205,11 @@ pub(super) fn build_viewer_controls(
     controls.append(&keyboard_menu_button);
     controls.append(&menu_button);
 
-    (controls, fullscreen_button)
+    ViewerControls {
+        container: controls,
+        fullscreen_button,
+        menu_buttons: vec![keyboard_menu_button, menu_button],
+    }
 }
 
 fn show_keyboard_shortcuts(window: &gtk::Window, hotkeys: &ViewerHotkeys) {

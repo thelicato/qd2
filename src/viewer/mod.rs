@@ -249,7 +249,7 @@ fn run_window(
         }
     });
 
-    let (titlebar_controls, titlebar_fullscreen_button) = chrome::build_viewer_controls(
+    let titlebar_controls = chrome::build_viewer_controls(
         &window,
         app_icon.as_ref(),
         hotkeys.as_ref().clone(),
@@ -260,12 +260,12 @@ fn run_window(
     let header_bar = gtk::HeaderBar::new();
     header_bar.set_show_title_buttons(true);
     header_bar.set_title_widget(Some(&title_label));
-    header_bar.pack_end(&titlebar_controls);
+    header_bar.pack_end(&titlebar_controls.container);
     if !undecorated {
         window.set_titlebar(Some(&header_bar));
     }
 
-    let (floating_controls, overlay_fullscreen_button) = chrome::build_viewer_controls(
+    let floating_controls = chrome::build_viewer_controls(
         &window,
         app_icon.as_ref(),
         hotkeys.as_ref().clone(),
@@ -273,7 +273,10 @@ fn run_window(
         screenshot_action,
         guest_shortcut_action,
     );
-    floating_controls.add_css_class("viewer-floating-controls");
+    floating_controls
+        .container
+        .add_css_class("viewer-floating-controls");
+    let fullscreen_menu_buttons = floating_controls.menu_buttons.clone();
 
     let fullscreen_revealer = gtk::Revealer::builder()
         .halign(gtk::Align::Center)
@@ -282,7 +285,7 @@ fn run_window(
         .transition_duration(180)
         .transition_type(gtk::RevealerTransitionType::SlideDown)
         .build();
-    fullscreen_revealer.set_child(Some(&floating_controls));
+    fullscreen_revealer.set_child(Some(&floating_controls.container));
     fullscreen_revealer.set_visible(false);
     overlay.add_overlay(&fullscreen_revealer);
     overlay.set_measure_overlay(&fullscreen_revealer, false);
@@ -303,8 +306,8 @@ fn run_window(
     let fullscreen_state = Rc::new(RefCell::new(chrome::FullscreenChromeState::default()));
     let titlebar_widget = header_bar.clone().upcast::<gtk::Widget>();
     let fullscreen_buttons = vec![
-        titlebar_fullscreen_button.clone(),
-        overlay_fullscreen_button.clone(),
+        titlebar_controls.fullscreen_button.clone(),
+        floating_controls.fullscreen_button.clone(),
     ];
     chrome::sync_fullscreen_chrome(
         &window,
@@ -349,7 +352,14 @@ fn run_window(
         let window = window.clone();
         let fullscreen_revealer = fullscreen_revealer.clone();
         let fullscreen_state = fullscreen_state.clone();
+        let fullscreen_menu_buttons = fullscreen_menu_buttons.clone();
         move |_| {
+            if fullscreen_menu_buttons
+                .iter()
+                .any(|button| button.is_active())
+            {
+                return;
+            }
             chrome::schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
         }
     });
@@ -365,11 +375,41 @@ fn run_window(
         let window = window.clone();
         let fullscreen_revealer = fullscreen_revealer.clone();
         let fullscreen_state = fullscreen_state.clone();
+        let fullscreen_menu_buttons = fullscreen_menu_buttons.clone();
         move |_| {
+            if fullscreen_menu_buttons
+                .iter()
+                .any(|button| button.is_active())
+            {
+                return;
+            }
             chrome::schedule_hide_fullscreen_bar(&window, &fullscreen_revealer, &fullscreen_state)
         }
     });
-    floating_controls.add_controller(floating_motion);
+    floating_controls.container.add_controller(floating_motion);
+
+    for tracked_button in &fullscreen_menu_buttons {
+        tracked_button.connect_active_notify({
+            let window = window.clone();
+            let fullscreen_revealer = fullscreen_revealer.clone();
+            let fullscreen_state = fullscreen_state.clone();
+            let fullscreen_menu_buttons = fullscreen_menu_buttons.clone();
+            move |_| {
+                if fullscreen_menu_buttons
+                    .iter()
+                    .any(|button| button.is_active())
+                {
+                    chrome::reveal_fullscreen_bar(&fullscreen_revealer, &fullscreen_state);
+                } else {
+                    chrome::schedule_hide_fullscreen_bar(
+                        &window,
+                        &fullscreen_revealer,
+                        &fullscreen_state,
+                    );
+                }
+            }
+        });
+    }
 
     let viewer_shortcuts = gtk::EventControllerKey::new();
     viewer_shortcuts.set_propagation_phase(gtk::PropagationPhase::Capture);
