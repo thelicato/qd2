@@ -15,7 +15,6 @@ mod utils;
 
 use std::{
     cell::RefCell,
-    convert::TryFrom,
     rc::Rc,
     sync::mpsc::{self as std_mpsc, TryRecvError},
     thread,
@@ -429,6 +428,7 @@ fn run_window(
     });
 
     let event_rx = Rc::new(RefCell::new(event_rx));
+    let current_software = Rc::new(RefCell::new(None::<framebuffer::SoftwarePresenter>));
     #[cfg(unix)]
     let current_dmabuf = Rc::new(RefCell::new(None::<dmabuf::DmabufPresenter>));
     #[cfg(unix)]
@@ -472,6 +472,7 @@ fn run_window(
 
     let process_events = Rc::new({
         let event_rx = event_rx.clone();
+        let current_software = current_software.clone();
         #[cfg(unix)]
         let current_dmabuf = current_dmabuf.clone();
         #[cfg(unix)]
@@ -494,6 +495,7 @@ fn run_window(
             }
 
             let mut latest_presentation = None;
+            let mut frame_patches = Vec::new();
             #[cfg(unix)]
             let mut dmabuf_updates = Vec::new();
             let mut latest_guest_clipboard = None;
@@ -513,6 +515,7 @@ fn run_window(
                     Ok(ViewerEvent::Frame(frame)) => {
                         latest_presentation = Some(PresentationEvent::Frame(frame))
                     }
+                    Ok(ViewerEvent::FramePatch(patch)) => frame_patches.push(patch),
                     #[cfg(unix)]
                     Ok(ViewerEvent::Dmabuf(scanout)) => {
                         latest_presentation = Some(PresentationEvent::Dmabuf(scanout))
@@ -586,32 +589,55 @@ fn run_window(
             if let Some(presentation) = latest_presentation {
                 match presentation {
                     PresentationEvent::Frame(frame) => {
+                        let presented = (|| -> anyhow::Result<()> {
+                            let mut current_software = current_software.borrow_mut();
+                            match current_software.as_mut() {
+                                Some(presenter) => {
+                                    presenter.update_frame(&frame)?;
+                                    present_paintable(
+                                        &picture,
+                                        &status_label,
+                                        &ui_state,
+                                        &window,
+                                        &window_base_title,
+                                        presenter.paintable(),
+                                        presenter.width(),
+                                        presenter.height(),
+                                    );
+                                    Ok::<(), anyhow::Error>(())
+                                }
+                                None => {
+                                    let presenter = framebuffer::SoftwarePresenter::new(&frame)?;
+                                    present_paintable(
+                                        &picture,
+                                        &status_label,
+                                        &ui_state,
+                                        &window,
+                                        &window_base_title,
+                                        presenter.paintable(),
+                                        presenter.width(),
+                                        presenter.height(),
+                                    );
+                                    *current_software = Some(presenter);
+                                    Ok(())
+                                }
+                            }
+                        })();
+
+                        if let Err(error) = presented {
+                            latest_status = Some(format!(
+                                "Could not prepare the framebuffer for display: {error:#}"
+                            ));
+                        }
+
                         #[cfg(unix)]
                         {
                             *current_dmabuf.borrow_mut() = None;
                         }
-
-                        let bytes = glib::Bytes::from_owned(frame.data);
-                        let texture = gdk::MemoryTexture::new(
-                            i32::try_from(frame.width).unwrap_or(i32::MAX),
-                            i32::try_from(frame.height).unwrap_or(i32::MAX),
-                            gdk::MemoryFormat::R8g8b8a8,
-                            &bytes,
-                            frame.stride,
-                        );
-                        present_paintable(
-                            &picture,
-                            &status_label,
-                            &ui_state,
-                            &window,
-                            &window_base_title,
-                            &texture,
-                            frame.width,
-                            frame.height,
-                        );
                     }
                     #[cfg(unix)]
                     PresentationEvent::Dmabuf(scanout) => {
+                        *current_software.borrow_mut() = None;
                         let transform = *dmabuf_transform.borrow();
                         match dmabuf::build_dmabuf_presenter(&display, scanout, transform) {
                             Ok(presenter) => {
@@ -631,6 +657,38 @@ fn run_window(
                                     Some(format!("Could not import the DMABUF scanout: {error:#}"));
                             }
                         }
+                    }
+                }
+            }
+
+            if !frame_patches.is_empty() {
+                let patched = (|| -> anyhow::Result<Option<()>> {
+                    let mut current_software = current_software.borrow_mut();
+                    match current_software.as_mut() {
+                        Some(presenter) => {
+                            for patch in &frame_patches {
+                                presenter.apply_patch(patch)?;
+                            }
+                            Ok(Some(()))
+                        }
+                        None => Ok(None),
+                    }
+                })();
+
+                match patched {
+                    Ok(Some(())) => {}
+                    Ok(None) => {
+                        if latest_status.is_none() {
+                            latest_status = Some(
+                                "Received a framebuffer update before the initial frame was available."
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        latest_status = Some(format!(
+                            "Could not refresh the framebuffer scanout: {error:#}"
+                        ));
                     }
                 }
             }
@@ -770,6 +828,7 @@ struct UiState {
 
 enum ViewerEvent {
     Frame(framebuffer::FrameSnapshot),
+    FramePatch(framebuffer::FramePatch),
     #[cfg(unix)]
     Dmabuf(dmabuf::DmabufFrame),
     #[cfg(unix)]
