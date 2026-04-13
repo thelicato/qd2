@@ -12,7 +12,9 @@ const VIEWER_CSS: &str = r#"
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 999px;
     padding: 6px 8px;
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.28);
 }
 
 .viewer-floating-controls button,
@@ -149,6 +151,8 @@ fn show_about_dialog(window: &gtk::Window, app_icon: Option<gdk::Texture>) {
     about.set_program_name(Some("QD2"));
     about.set_version(Some(env!("CARGO_PKG_VERSION")));
     about.set_comments(Some("QEMU D-Bus Display client"));
+    about.set_website(Some(env!("CARGO_PKG_REPOSITORY")));
+    about.set_website_label("GitHub");
     if let Some(icon) = app_icon.as_ref() {
         about.set_logo(Some(icon));
     }
