@@ -430,7 +430,7 @@ fn run_window(
 
     let event_rx = Rc::new(RefCell::new(event_rx));
     #[cfg(unix)]
-    let current_dmabuf = Rc::new(RefCell::new(None::<dmabuf::DmabufPresentation>));
+    let current_dmabuf = Rc::new(RefCell::new(None::<dmabuf::DmabufPresenter>));
     #[cfg(unix)]
     let dmabuf_transform = Rc::new(RefCell::new(dmabuf::DmabufViewTransform::default()));
     let window_base_title = ready.title.clone();
@@ -442,11 +442,6 @@ fn run_window(
             let current_dmabuf = current_dmabuf.clone();
             let dmabuf_transform = dmabuf_transform.clone();
             let hotkeys = hotkeys.clone();
-            let picture = picture.clone();
-            let status_label = status_label.clone();
-            let ui_state = ui_state.clone();
-            let window = window.clone();
-            let window_base_title = window_base_title.clone();
             move |_, keyval, _, state| {
                 {
                     let mut transform = dmabuf_transform.borrow_mut();
@@ -460,18 +455,8 @@ fn run_window(
                         return glib::Propagation::Proceed;
                     }
 
-                    if let Some(presentation) = current_dmabuf.borrow().as_ref() {
-                        if let Err(error) = dmabuf::present_dmabuf_paintable(
-                            &picture,
-                            &status_label,
-                            &ui_state,
-                            &window,
-                            &window_base_title,
-                            presentation,
-                            *transform,
-                        ) {
-                            eprintln!("QD2 DMABUF transform error: {error:#}");
-                        }
+                    if let Some(presenter) = current_dmabuf.borrow_mut().as_mut() {
+                        presenter.set_transform(*transform);
                     }
 
                     eprintln!("QD2 {}", transform.describe());
@@ -627,27 +612,18 @@ fn run_window(
                     }
                     #[cfg(unix)]
                     PresentationEvent::Dmabuf(scanout) => {
-                        match dmabuf::build_dmabuf_presentation(&display, scanout) {
-                            Ok(presentation) => {
-                                let transform = *dmabuf_transform.borrow();
-                                match dmabuf::present_dmabuf_paintable(
+                        let transform = *dmabuf_transform.borrow();
+                        match dmabuf::build_dmabuf_presenter(&display, scanout, transform) {
+                            Ok(presenter) => {
+                                dmabuf::present_dmabuf_presenter(
                                     &picture,
                                     &status_label,
                                     &ui_state,
                                     &window,
                                     &window_base_title,
-                                    &presentation,
-                                    transform,
-                                ) {
-                                    Ok(()) => {
-                                        *current_dmabuf.borrow_mut() = Some(presentation);
-                                    }
-                                    Err(error) => {
-                                        latest_status = Some(format!(
-                                            "Could not prepare the DMABUF scanout for display: {error:#}"
-                                        ));
-                                    }
-                                }
+                                    &presenter,
+                                );
+                                *current_dmabuf.borrow_mut() = Some(presenter);
                             }
                             Err(error) => {
                                 *current_dmabuf.borrow_mut() = None;
@@ -663,20 +639,9 @@ fn run_window(
             if !dmabuf_updates.is_empty() {
                 let refreshed = {
                     let mut current_dmabuf = current_dmabuf.borrow_mut();
-                    let transform = *dmabuf_transform.borrow();
                     match current_dmabuf.as_mut() {
-                        Some(presentation) => match presentation.refresh(&display, &dmabuf_updates)
-                        {
-                            Ok(()) => dmabuf::present_dmabuf_paintable(
-                                &picture,
-                                &status_label,
-                                &ui_state,
-                                &window,
-                                &window_base_title,
-                                presentation,
-                                transform,
-                            )
-                            .map(Some),
+                        Some(presenter) => match presenter.refresh(&display, &dmabuf_updates) {
+                            Ok(()) => Ok(Some(())),
                             Err(error) => Err(error),
                         },
                         None => Ok(None),

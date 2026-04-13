@@ -1,12 +1,14 @@
 use std::{cell::RefCell, convert::TryFrom, rc::Rc};
 
 use anyhow::{Context, Result, bail};
-use gtk::{cairo, gdk, prelude::*};
+use gtk::{cairo, gdk, glib, prelude::*};
 use gtk4 as gtk;
 #[cfg(unix)]
 use qemu_display::ScanoutDMABUF;
 use qemu_display::UpdateDMABUF;
 
+#[cfg(unix)]
+use gdk::subclass::prelude::*;
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
@@ -27,7 +29,7 @@ pub(super) struct DmabufPresentation {
 }
 
 #[cfg(unix)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) struct DmabufViewTransform {
     rotation_quarters: u8,
     extra_vertical_flip: bool,
@@ -151,19 +153,201 @@ impl DmabufFrame {
     }
 }
 
+#[cfg(unix)]
+pub(super) struct DmabufPresenter {
+    presentation: DmabufPresentation,
+    paintable: DmabufPaintable,
+    transform: DmabufViewTransform,
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct PaintableState {
+    texture: Option<gdk::Texture>,
+    width: u32,
+    height: u32,
+    y0_top: bool,
+    transform: DmabufViewTransform,
+}
+
+#[cfg(unix)]
+impl Default for PaintableState {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            width: 0,
+            height: 0,
+            y0_top: true,
+            transform: DmabufViewTransform::default(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl PaintableState {
+    fn update_from_presentation(
+        &mut self,
+        presentation: &DmabufPresentation,
+        transform: DmabufViewTransform,
+    ) -> bool {
+        let size_changed = self.width != presentation.width || self.height != presentation.height;
+        self.texture = Some(presentation.texture.clone());
+        self.width = presentation.width;
+        self.height = presentation.height;
+        self.y0_top = presentation.y0_top;
+        self.transform = transform;
+        size_changed
+    }
+
+    fn intrinsic_width(&self) -> i32 {
+        i32::try_from(self.width).unwrap_or(i32::MAX)
+    }
+
+    fn intrinsic_height(&self) -> i32 {
+        i32::try_from(self.height).unwrap_or(i32::MAX)
+    }
+
+    fn intrinsic_aspect_ratio(&self) -> f64 {
+        if self.height == 0 {
+            0.0
+        } else {
+            f64::from(self.width) / f64::from(self.height)
+        }
+    }
+
+    fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+        let Some(texture) = self.texture.as_ref() else {
+            return;
+        };
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+
+        let width = width as f32;
+        let height = height as f32;
+        let bounds = gtk::graphene::Rect::new(0.0, 0.0, width, height);
+
+        snapshot.save();
+
+        match self.transform.rotation_quarters % 4 {
+            0 => {}
+            1 => {
+                snapshot.translate(&gtk::graphene::Point::new(height, 0.0));
+                snapshot.rotate(90.0);
+            }
+            2 => {
+                snapshot.translate(&gtk::graphene::Point::new(width, height));
+                snapshot.rotate(180.0);
+            }
+            3 => {
+                snapshot.translate(&gtk::graphene::Point::new(0.0, width));
+                snapshot.rotate(270.0);
+            }
+            _ => unreachable!(),
+        }
+
+        if dmabuf_needs_vertical_flip(self.y0_top, self.transform) {
+            snapshot.translate(&gtk::graphene::Point::new(0.0, height));
+            snapshot.scale(1.0, -1.0);
+        }
+
+        snapshot.append_texture(texture, &bounds);
+        snapshot.restore();
+    }
+}
+
+#[cfg(unix)]
+mod paintable_imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct DmabufPaintable {
+        pub(super) state: RefCell<PaintableState>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for DmabufPaintable {
+        const NAME: &'static str = "Qd2DmabufPaintable";
+        type Type = super::DmabufPaintable;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for DmabufPaintable {}
+
+    impl PaintableImpl for DmabufPaintable {
+        fn current_image(&self) -> gdk::Paintable {
+            self.obj().clone().upcast()
+        }
+
+        fn flags(&self) -> gdk::PaintableFlags {
+            gdk::PaintableFlags::empty()
+        }
+
+        fn intrinsic_width(&self) -> i32 {
+            self.state.borrow().intrinsic_width()
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.state.borrow().intrinsic_height()
+        }
+
+        fn intrinsic_aspect_ratio(&self) -> f64 {
+            self.state.borrow().intrinsic_aspect_ratio()
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            self.state.borrow().snapshot(snapshot, width, height);
+        }
+    }
+}
+
+#[cfg(unix)]
+glib::wrapper! {
+    pub struct DmabufPaintable(ObjectSubclass<paintable_imp::DmabufPaintable>)
+        @implements gdk::Paintable;
+}
+
+#[cfg(unix)]
+impl DmabufPaintable {
+    fn new(presentation: &DmabufPresentation, transform: DmabufViewTransform) -> Self {
+        let paintable: Self = glib::Object::new();
+        paintable.update_from_presentation(presentation, transform);
+        paintable
+    }
+
+    fn update_from_presentation(
+        &self,
+        presentation: &DmabufPresentation,
+        transform: DmabufViewTransform,
+    ) {
+        let size_changed = self
+            .imp()
+            .state
+            .borrow_mut()
+            .update_from_presentation(presentation, transform);
+
+        if size_changed {
+            self.invalidate_size();
+        }
+        self.invalidate_contents();
+    }
+}
+
 #[cfg(target_os = "linux")]
-pub(super) fn build_dmabuf_presentation(
+pub(super) fn build_dmabuf_presenter(
     display: &gdk::Display,
     scanout: DmabufFrame,
-) -> Result<DmabufPresentation> {
-    DmabufPresentation::new(display, scanout)
+    transform: DmabufViewTransform,
+) -> Result<DmabufPresenter> {
+    DmabufPresenter::new(display, scanout, transform)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-pub(super) fn build_dmabuf_presentation(
+pub(super) fn build_dmabuf_presenter(
     _display: &gdk::Display,
     _scanout: DmabufFrame,
-) -> Result<DmabufPresentation> {
+    _transform: DmabufViewTransform,
+) -> Result<DmabufPresenter> {
     bail!("DMABUF import is currently supported only on Linux GTK builds")
 }
 
@@ -222,77 +406,82 @@ impl DmabufPresentation {
 
         Ok(())
     }
+}
 
-    fn to_paintable(&self, transform: DmabufViewTransform) -> Result<gdk::Paintable> {
-        let needs_vertical_flip = !self.y0_top ^ transform.extra_vertical_flip;
-        if !needs_vertical_flip && transform.rotation_quarters == 0 {
-            return Ok(self.texture.clone().upcast());
-        }
+#[cfg(unix)]
+impl DmabufPresenter {
+    fn new(
+        display: &gdk::Display,
+        scanout: DmabufFrame,
+        transform: DmabufViewTransform,
+    ) -> Result<Self> {
+        let presentation = DmabufPresentation::new(display, scanout)?;
+        let paintable = DmabufPaintable::new(&presentation, transform);
 
-        let snapshot = gtk::Snapshot::new();
-        let bounds = gtk::graphene::Rect::new(0.0, 0.0, self.width as f32, self.height as f32);
+        Ok(Self {
+            presentation,
+            paintable,
+            transform,
+        })
+    }
 
-        snapshot.save();
+    pub(super) fn refresh(
+        &mut self,
+        display: &gdk::Display,
+        updates: &[UpdateDMABUF],
+    ) -> Result<()> {
+        self.presentation.refresh(display, updates)?;
+        self.paintable
+            .update_from_presentation(&self.presentation, self.transform);
+        Ok(())
+    }
 
-        match transform.rotation_quarters % 4 {
-            0 => {}
-            1 => {
-                snapshot.translate(&gtk::graphene::Point::new(self.height as f32, 0.0));
-                snapshot.rotate(90.0);
-            }
-            2 => {
-                snapshot.translate(&gtk::graphene::Point::new(
-                    self.width as f32,
-                    self.height as f32,
-                ));
-                snapshot.rotate(180.0);
-            }
-            3 => {
-                snapshot.translate(&gtk::graphene::Point::new(0.0, self.width as f32));
-                snapshot.rotate(270.0);
-            }
-            _ => unreachable!(),
-        }
+    pub(super) fn set_transform(&mut self, transform: DmabufViewTransform) {
+        self.transform = transform;
+        self.paintable
+            .update_from_presentation(&self.presentation, self.transform);
+    }
 
-        if needs_vertical_flip {
-            snapshot.translate(&gtk::graphene::Point::new(0.0, self.height as f32));
-            snapshot.scale(1.0, -1.0);
-        }
+    fn paintable(&self) -> &gdk::Paintable {
+        self.paintable.upcast_ref()
+    }
 
-        snapshot.append_texture(&self.texture, &bounds);
-        snapshot.restore();
+    fn width(&self) -> u32 {
+        self.presentation.width
+    }
 
-        snapshot
-            .to_paintable(Some(&gtk::graphene::Size::new(
-                self.width as f32,
-                self.height as f32,
-            )))
-            .context("failed to build a GTK paintable for the DMABUF texture")
+    fn height(&self) -> u32 {
+        self.presentation.height
     }
 }
 
 #[cfg(unix)]
-pub(super) fn present_dmabuf_paintable(
+pub(super) fn present_dmabuf_presenter(
     picture: &gtk::Picture,
     status_label: &gtk::Label,
     ui_state: &Rc<RefCell<UiState>>,
     window: &gtk::Window,
     window_base_title: &str,
-    presentation: &DmabufPresentation,
-    transform: DmabufViewTransform,
-) -> Result<()> {
-    let paintable = presentation.to_paintable(transform)?;
+    presenter: &DmabufPresenter,
+) {
+    if picture.paintable().as_ref() != Some(presenter.paintable()) {
+        picture.set_paintable(Some(presenter.paintable()));
+    }
     super::present_paintable(
         picture,
         status_label,
         ui_state,
         window,
         window_base_title,
-        &paintable,
-        paintable.intrinsic_width().max(0) as u32,
-        paintable.intrinsic_height().max(0) as u32,
+        presenter.paintable(),
+        presenter.width(),
+        presenter.height(),
     );
-    Ok(())
+}
+
+#[cfg(unix)]
+fn dmabuf_needs_vertical_flip(y0_top: bool, transform: DmabufViewTransform) -> bool {
+    !y0_top ^ transform.extra_vertical_flip
 }
 
 #[cfg(target_os = "linux")]
