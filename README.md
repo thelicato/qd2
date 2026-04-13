@@ -13,6 +13,8 @@
 
 QD2 is built for people who want the flexibility of QEMU's D-Bus display stack without giving up a polished desktop viewer. It combines a CLI that is useful for scripting and debugging with a GTK4 frontend that handles real-world VM workflows like framebuffer rendering, DMABUF scanouts, input grab, clipboard sync, audio playback, and diagnostics.
 
+![Screenshot](./docs/screenshot.png)
+
 ## ✨ Why QD2
 
 - Discover QEMU D-Bus VMs on the session bus and common libvirt private socket locations.
