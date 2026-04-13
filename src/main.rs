@@ -62,7 +62,12 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
         }
     };
     print_warnings(&target.warnings);
-    viewer::connect(target, args.address(), args.hotkeys.as_deref())
+    viewer::connect(
+        target,
+        args.address(),
+        args.hotkeys.as_deref(),
+        args.fullscreen,
+    )
 }
 
 fn report_connect_error(error: &Error) {

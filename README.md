@@ -29,7 +29,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `qd2 list` | Enumerate visible QEMU D-Bus VMs. | `qd2 list` |
 | `qd2 inspect` | Print VM metadata, consoles, chardevs, and exported helper objects. | `qd2 inspect --vm demo-vm` |
 | `qd2 doctor` | Check the host environment and report likely VM-side wiring issues. | `qd2 doctor --vm demo-vm` |
-| `qd2 connect` | Open the GTK4 viewer for one console. | `qd2 connect --address "unix:path=<path_to_sock>"` |
+| `qd2 connect` | Open the GTK4 viewer for one console. | `qd2 connect --fullscreen --address "unix:path=<path_to_sock>"` |
 | `qd2 version` | Print the QD2 version from the Cargo package metadata. | `qd2 version` |
 
 ## 🛠️ Common Options
@@ -38,6 +38,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | --- | --- | --- |
 | `--address <DBUS_ADDRESS>` | Target a specific private D-Bus socket instead of auto-discovery. | `qd2 inspect --address "unix:path=<path_to_sock>"` |
 | `--verbose` | Print extra discovery and viewer diagnostics. | `qd2 --verbose doctor` |
+| `--fullscreen` | Start the GTK4 viewer directly in fullscreen mode for `connect`. | `qd2 connect --fullscreen` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights
@@ -48,6 +49,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Clipboard sync for text, HTML, URI lists, images, and primary selection support where available.
 - Guest audio playback through the QEMU D-Bus audio interface.
 - Floating fullscreen controls inspired by virt-viewer.
+- Direct fullscreen launch with `qd2 connect --fullscreen`.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
 - A VM chooser for the multi-VM `connect` flow.
 

@@ -85,6 +85,10 @@ pub struct ConnectArgs {
     /// `toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt`
     #[arg(long, value_name = "ACTION=ACCEL[,ACTION=ACCEL...]")]
     pub hotkeys: Option<String>,
+
+    /// Start the viewer directly in fullscreen mode.
+    #[arg(long)]
+    pub fullscreen: bool,
 }
 
 impl ConnectArgs {

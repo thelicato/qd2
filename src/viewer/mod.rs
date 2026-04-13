@@ -123,6 +123,7 @@ pub fn connect(
     target: ConnectTarget,
     requested_address: Option<&str>,
     hotkeys_spec: Option<&str>,
+    start_fullscreen: bool,
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
@@ -146,7 +147,7 @@ pub fn connect(
         .recv()
         .context("display listener thread ended before it reported startup state")??;
 
-    let ui_result = run_window(&ready, event_rx, input_tx, hotkeys);
+    let ui_result = run_window(&ready, event_rx, input_tx, hotkeys, start_fullscreen);
 
     let _ = shutdown_tx.send(());
     join_handle
@@ -163,6 +164,7 @@ fn run_window(
     event_rx: events::EventReceiver,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
     hotkeys: hotkeys::ViewerHotkeys,
+    start_fullscreen: bool,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -777,6 +779,9 @@ fn run_window(
     });
 
     window.present();
+    if start_fullscreen {
+        window.fullscreen();
+    }
     picture.grab_focus();
     main_loop.run();
     Ok(())
