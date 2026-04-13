@@ -4,6 +4,7 @@ mod chrome;
 mod clipboard;
 mod cursor;
 mod dmabuf;
+mod events;
 mod framebuffer;
 mod grab;
 mod hotkeys;
@@ -16,10 +17,12 @@ use std::{
     cell::RefCell,
     convert::TryFrom,
     rc::Rc,
-    sync::mpsc::{self as std_mpsc, Receiver, TryRecvError},
+    sync::mpsc::{self as std_mpsc, TryRecvError},
     thread,
-    time::Duration,
 };
+
+#[cfg(not(unix))]
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use gtk::{gdk, glib, prelude::*};
@@ -30,6 +33,7 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use self::mouse::MouseMode;
 use crate::qemu::{ConnectTarget, VmSummary};
 
+#[cfg(not(unix))]
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 pub fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
@@ -123,7 +127,7 @@ pub fn connect(
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
-    let (event_tx, event_rx) = std_mpsc::channel();
+    let (event_tx, event_rx) = events::channel()?;
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
     let (input_tx, input_rx) = tokio_mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -157,7 +161,7 @@ pub fn connect(
 /// DMABUF presentation coming from the listener thread.
 fn run_window(
     ready: &ViewerReady,
-    event_rx: Receiver<ViewerEvent>,
+    event_rx: events::EventReceiver,
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
     hotkeys: hotkeys::ViewerHotkeys,
 ) -> Result<()> {
@@ -478,7 +482,10 @@ fn run_window(
         });
         picture.add_controller(shortcuts);
     }
-    glib::timeout_add_local(FRAME_POLL_INTERVAL, {
+    #[cfg(unix)]
+    let wake_fd = event_rx.borrow().wake_fd();
+
+    let process_events = Rc::new({
         let event_rx = event_rx.clone();
         #[cfg(unix)]
         let current_dmabuf = current_dmabuf.clone();
@@ -496,7 +503,11 @@ fn run_window(
         let window = window.clone();
         let window_base_title = window_base_title.clone();
 
-        move || {
+        move |drain_wakeup: bool| {
+            if drain_wakeup {
+                event_rx.borrow_mut().drain_wakeup();
+            }
+
             let mut latest_presentation = None;
             #[cfg(unix)]
             let mut dmabuf_updates = Vec::new();
@@ -509,7 +520,7 @@ fn run_window(
 
             loop {
                 let event = {
-                    let receiver = event_rx.borrow_mut();
+                    let mut receiver = event_rx.borrow_mut();
                     receiver.try_recv()
                 };
 
@@ -711,6 +722,22 @@ fn run_window(
         }
     });
 
+    #[cfg(unix)]
+    glib::source::unix_fd_add_local(
+        wake_fd,
+        glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR,
+        {
+            let process_events = process_events.clone();
+            move |_, _| process_events(true)
+        },
+    );
+
+    #[cfg(not(unix))]
+    glib::timeout_add_local(FRAME_POLL_INTERVAL, {
+        let process_events = process_events.clone();
+        move || process_events(false)
+    });
+
     window.connect_close_request({
         let main_loop = main_loop.clone();
         let window = window.clone();
@@ -807,11 +834,26 @@ mod tests {
     use super::{
         InputEvent,
         dmabuf::dmabuf_update_rectangle,
+        events,
         framebuffer::{Framebuffer, PixelFormat},
         keyboard::linux_keycode_to_qnum,
         mouse::{input_needs_mouse_mode, widget_coords_to_guest_position},
     };
     use qemu_display::{Scanout, UpdateDMABUF};
+
+    #[test]
+    fn event_channel_delivers_events() {
+        let (event_tx, mut event_rx) = events::channel().expect("event channel should be created");
+        event_tx
+            .send(super::ViewerEvent::Status("ready".to_owned()))
+            .expect("send should succeed");
+
+        match event_rx.try_recv() {
+            Ok(super::ViewerEvent::Status(message)) => assert_eq!(message, "ready"),
+            Ok(_) => panic!("unexpected viewer event variant"),
+            Err(error) => panic!("expected queued viewer event, got {error:?}"),
+        }
+    }
 
     #[test]
     #[cfg(target_endian = "little")]

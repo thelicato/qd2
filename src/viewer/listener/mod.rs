@@ -1,19 +1,19 @@
 mod remote;
 mod session;
 
-use std::sync::mpsc::{Sender, SyncSender};
+use std::sync::mpsc::SyncSender;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use crate::qemu::ConnectTarget;
 
-use super::{InputEvent, ViewerEvent, ViewerReady};
+use super::{InputEvent, ViewerReady, events::EventSender};
 use session::{SessionOutcome, listener_session};
 
 pub(super) fn run_listener_thread(
     initial_target: ConnectTarget,
-    event_tx: Sender<ViewerEvent>,
+    event_tx: EventSender,
     ready_tx: SyncSender<Result<ViewerReady>>,
     input_rx: tokio_mpsc::UnboundedReceiver<InputEvent>,
     shutdown_rx: oneshot::Receiver<()>,
@@ -37,7 +37,7 @@ pub(super) fn run_listener_thread(
 
 async fn listener_supervisor_main(
     initial_target: ConnectTarget,
-    event_tx: Sender<ViewerEvent>,
+    event_tx: EventSender,
     ready_tx: SyncSender<Result<ViewerReady>>,
     mut input_rx: tokio_mpsc::UnboundedReceiver<InputEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,

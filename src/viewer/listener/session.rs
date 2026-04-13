@@ -1,7 +1,4 @@
-use std::{
-    sync::mpsc::{Sender, SyncSender},
-    time::Duration,
-};
+use std::{sync::mpsc::SyncSender, time::Duration};
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
@@ -10,6 +7,7 @@ use crate::qemu::{self, ConnectTarget};
 
 use super::super::{
     InputEvent, ViewerEvent, ViewerReady, audio, clipboard,
+    events::EventSender,
     mouse::{self, MouseMode},
 };
 use super::remote::RemoteConsole;
@@ -24,7 +22,7 @@ pub(super) enum SessionOutcome {
 
 pub(super) async fn listener_session(
     target: ConnectTarget,
-    event_tx: &Sender<ViewerEvent>,
+    event_tx: &EventSender,
     ready_tx: &SyncSender<Result<ViewerReady>>,
     input_rx: &mut tokio_mpsc::UnboundedReceiver<InputEvent>,
     shutdown_rx: &mut oneshot::Receiver<()>,

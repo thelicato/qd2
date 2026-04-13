@@ -1,11 +1,11 @@
-use std::{convert::TryFrom, sync::mpsc::Sender};
+use std::convert::TryFrom;
 
 use anyhow::{Context, Result, bail};
 use qemu_display::{Scanout, Update};
 #[cfg(unix)]
 use qemu_display::{ScanoutDMABUF, ScanoutMap, ScanoutMmap, UpdateDMABUF, UpdateMap};
 
-use super::{ViewerEvent, cursor::GuestCursor, dmabuf::DmabufFrame};
+use super::{ViewerEvent, cursor::GuestCursor, dmabuf::DmabufFrame, events::EventSender};
 
 const PIXMAN_A8B8G8R8: u32 = pixman_sys::pixman_format_code_t_PIXMAN_a8b8g8r8;
 const PIXMAN_A8R8G8B8: u32 = pixman_sys::pixman_format_code_t_PIXMAN_a8r8g8b8;
@@ -351,12 +351,12 @@ impl Framebuffer {
 }
 
 pub(super) struct FrameStreamHandler {
-    event_tx: Sender<ViewerEvent>,
+    event_tx: EventSender,
     framebuffer: Option<Framebuffer>,
 }
 
 impl FrameStreamHandler {
-    pub(super) fn new(event_tx: Sender<ViewerEvent>) -> Self {
+    pub(super) fn new(event_tx: EventSender) -> Self {
         Self {
             event_tx,
             framebuffer: None,

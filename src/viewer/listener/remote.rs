@@ -1,7 +1,6 @@
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc::Sender,
 };
 
 #[cfg(not(unix))]
@@ -21,7 +20,7 @@ use zbus::{
 #[cfg(unix)]
 use std::os::fd::{AsFd, IntoRawFd};
 
-use super::super::{InputEvent, ViewerEvent, framebuffer::FrameStreamHandler};
+use super::super::{InputEvent, events::EventSender, framebuffer::FrameStreamHandler};
 
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
 
@@ -128,7 +127,7 @@ impl RemoteConsole {
 
     /// Register the local peer-to-peer listener object that QEMU pushes scanout
     /// updates into for this console.
-    pub(super) async fn register_listener(&mut self, event_tx: Sender<ViewerEvent>) -> Result<()> {
+    pub(super) async fn register_listener(&mut self, event_tx: EventSender) -> Result<()> {
         #[cfg(not(unix))]
         {
             let _ = event_tx;
@@ -179,7 +178,7 @@ struct SharedListenerState {
 }
 
 impl SharedListenerState {
-    fn new(event_tx: Sender<ViewerEvent>) -> Self {
+    fn new(event_tx: EventSender) -> Self {
         Self {
             handler: Mutex::new(FrameStreamHandler::new(event_tx)),
             disconnected: AtomicBool::new(false),

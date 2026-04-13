@@ -155,6 +155,7 @@ Bug reports and pull requests are welcome.
 | `viewer/clipboard.rs` | Bridges GTK clipboard state and the QEMU clipboard protocol in both directions. |
 | `viewer/cursor.rs` | Tracks guest cursor shape and visibility and applies them to the viewer. |
 | `viewer/dmabuf.rs` | Imports, transforms, and presents DMABUF scanouts for accelerated rendering. |
+| `viewer/events.rs` | Couples viewer events with a GTK wakeup source so frame updates reach the UI promptly. |
 | `viewer/framebuffer.rs` | Normalizes software framebuffer updates and emits presentation events. |
 | `viewer/grab.rs` | Manages keyboard and mouse capture, release, and cursor grabbing behavior. |
 | `viewer/hotkeys.rs` | Parses configurable hotkey definitions and matches them at runtime. |

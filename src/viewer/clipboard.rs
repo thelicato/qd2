@@ -3,7 +3,7 @@ use std::{
     env,
     rc::Rc,
     sync::OnceLock,
-    sync::{Arc, Mutex, mpsc::Sender},
+    sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
@@ -23,7 +23,7 @@ use zbus::Connection;
 
 use crate::diagnostics;
 
-use super::{InputEvent, ViewerEvent};
+use super::{InputEvent, ViewerEvent, events::EventSender};
 
 const TEXT_PLAIN_UTF8: &str = "text/plain;charset=utf-8";
 const TEXT_PLAIN: &str = "text/plain";
@@ -338,7 +338,7 @@ pub(super) fn apply_guest_clipboard(
 pub(super) async fn register_clipboard_bridge(
     connection: &Connection,
     owner: &str,
-    event_tx: Sender<ViewerEvent>,
+    event_tx: EventSender,
 ) -> anyhow::Result<Option<ClipboardSession>> {
     debug(format!("register clipboard bridge for owner={owner}"));
     let display = Display::new(connection, Some(owner.to_owned()))
@@ -514,7 +514,7 @@ impl ClipboardBridgeState {
 
 struct ClipboardListener {
     clipboard: RemoteClipboard,
-    event_tx: Sender<ViewerEvent>,
+    event_tx: EventSender,
     shared: Arc<Mutex<ClipboardBridgeState>>,
 }
 
