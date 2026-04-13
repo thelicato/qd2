@@ -124,6 +124,7 @@ pub fn connect(
     requested_address: Option<&str>,
     hotkeys_spec: Option<&str>,
     start_fullscreen: bool,
+    undecorated: bool,
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
@@ -147,7 +148,14 @@ pub fn connect(
         .recv()
         .context("display listener thread ended before it reported startup state")??;
 
-    let ui_result = run_window(&ready, event_rx, input_tx, hotkeys, start_fullscreen);
+    let ui_result = run_window(
+        &ready,
+        event_rx,
+        input_tx,
+        hotkeys,
+        start_fullscreen,
+        undecorated,
+    );
 
     let _ = shutdown_tx.send(());
     join_handle
@@ -165,6 +173,7 @@ fn run_window(
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
     hotkeys: hotkeys::ViewerHotkeys,
     start_fullscreen: bool,
+    undecorated: bool,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -201,6 +210,7 @@ fn run_window(
         .child(&overlay)
         .build();
     window.set_resizable(true);
+    window.set_decorated(!undecorated);
     if let Some(icon) = app_icon.clone() {
         window.connect_realize(move |window| {
             if let Err(error) = utils::apply_window_icon(window, &icon) {
@@ -223,7 +233,9 @@ fn run_window(
     header_bar.set_show_title_buttons(true);
     header_bar.set_title_widget(Some(&title_label));
     header_bar.pack_end(&titlebar_controls);
-    window.set_titlebar(Some(&header_bar));
+    if !undecorated {
+        window.set_titlebar(Some(&header_bar));
+    }
 
     let (floating_controls, overlay_fullscreen_button) =
         chrome::build_viewer_controls(&window, app_icon.as_ref(), hotkeys.as_ref().clone());
@@ -267,6 +279,7 @@ fn run_window(
         &fullscreen_hotspot,
         &fullscreen_buttons,
         &fullscreen_state,
+        !undecorated,
     );
     window.connect_fullscreened_notify({
         let header_bar = titlebar_widget.clone();
@@ -274,6 +287,7 @@ fn run_window(
         let fullscreen_hotspot = fullscreen_hotspot.clone();
         let fullscreen_buttons = fullscreen_buttons.clone();
         let fullscreen_state = fullscreen_state.clone();
+        let decorated = !undecorated;
         move |window| {
             chrome::sync_fullscreen_chrome(
                 window,
@@ -282,6 +296,7 @@ fn run_window(
                 &fullscreen_hotspot,
                 &fullscreen_buttons,
                 &fullscreen_state,
+                decorated,
             );
         }
     });

@@ -218,6 +218,7 @@ pub(super) fn sync_fullscreen_chrome(
     fullscreen_hotspot: &gtk::Box,
     fullscreen_buttons: &[gtk::Button],
     fullscreen_state: &Rc<RefCell<FullscreenChromeState>>,
+    decorated_window: bool,
 ) {
     let is_fullscreen = window.is_fullscreen();
     for button in fullscreen_buttons {
@@ -234,6 +235,10 @@ pub(super) fn sync_fullscreen_chrome(
         fullscreen_revealer.set_reveal_child(false);
         fullscreen_revealer.set_visible(false);
         fullscreen_hotspot.set_visible(false);
-        window.set_titlebar(Some(header_bar));
+        if decorated_window {
+            window.set_titlebar(Some(header_bar));
+        } else {
+            window.set_titlebar(None::<&gtk::Widget>);
+        }
     }
 }

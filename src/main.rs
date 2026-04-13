@@ -67,6 +67,7 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
         args.address(),
         args.hotkeys.as_deref(),
         args.fullscreen,
+        args.undecorated,
     )
 }
 

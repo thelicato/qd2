@@ -89,6 +89,10 @@ pub struct ConnectArgs {
     /// Start the viewer directly in fullscreen mode.
     #[arg(long)]
     pub fullscreen: bool,
+
+    /// Open the viewer without normal window decorations.
+    #[arg(long)]
+    pub undecorated: bool,
 }
 
 impl ConnectArgs {

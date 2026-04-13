@@ -39,6 +39,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--address <DBUS_ADDRESS>` | Target a specific private D-Bus socket instead of auto-discovery. | `qd2 inspect --address "unix:path=<path_to_sock>"` |
 | `--verbose` | Print extra discovery and viewer diagnostics. | `qd2 --verbose doctor` |
 | `--fullscreen` | Start the GTK4 viewer directly in fullscreen mode for `connect`. | `qd2 connect --fullscreen` |
+| `--undecorated` | Open the GTK4 viewer without normal window decorations for `connect`. | `qd2 connect --undecorated` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights
@@ -50,6 +51,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Guest audio playback through the QEMU D-Bus audio interface.
 - Floating fullscreen controls inspired by virt-viewer.
 - Direct fullscreen launch with `qd2 connect --fullscreen`.
+- Optional undecorated launch mode for tiling compositor workflows.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
 - A VM chooser for the multi-VM `connect` flow.
 
