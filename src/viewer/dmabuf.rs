@@ -61,10 +61,14 @@ impl DmabufViewTransform {
         *self = Self::default();
     }
 
+    fn rotation_degrees(self) -> u16 {
+        u16::from(self.rotation_quarters) * 90
+    }
+
     pub(super) fn describe(self) -> String {
         format!(
             "DMABUF transform: rotate={} extra-flip-y={}",
-            self.rotation_quarters * 90,
+            self.rotation_degrees(),
             if self.extra_vertical_flip {
                 "on"
             } else {
@@ -592,4 +596,30 @@ pub(super) fn dmabuf_update_rectangle(
     }
 
     Some(cairo::RectangleInt::new(x0, y0, x1 - x0, y1 - y0))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::DmabufViewTransform;
+
+    #[cfg(unix)]
+    #[test]
+    fn dmabuf_transform_describe_handles_all_quarter_turns() {
+        let mut transform = DmabufViewTransform::default();
+
+        assert!(transform.describe().contains("rotate=0"));
+
+        transform.rotate_clockwise();
+        assert!(transform.describe().contains("rotate=90"));
+
+        transform.rotate_clockwise();
+        assert!(transform.describe().contains("rotate=180"));
+
+        transform.rotate_clockwise();
+        assert!(transform.describe().contains("rotate=270"));
+
+        transform.rotate_clockwise();
+        assert!(transform.describe().contains("rotate=0"));
+    }
 }
