@@ -19,7 +19,7 @@ pub(super) fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
 
     let window = gtk::Window::builder()
         .title("Choose a VM - QD2")
-        .default_width(760)
+        .default_width(430)
         .default_height(460)
         .modal(true)
         .build();
@@ -85,7 +85,6 @@ pub(super) fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
         let uuid = gtk::Label::new(Some(&format!("UUID: {}", vm.uuid)));
         uuid.set_xalign(0.0);
         uuid.add_css_class("dim-label");
-        uuid.set_selectable(true);
         card.append(&uuid);
 
         let source = gtk::Label::new(Some(&format!("Source: {}", vm.source_label)));
@@ -93,16 +92,6 @@ pub(super) fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
         source.add_css_class("dim-label");
         source.set_wrap(true);
         card.append(&source);
-
-        let details = gtk::Label::new(Some(&format!(
-            "Owner: {}   |   Consoles: {}",
-            vm.owner,
-            vm.console_ids.len()
-        )));
-        details.set_xalign(0.0);
-        details.add_css_class("dim-label");
-        details.set_wrap(true);
-        card.append(&details);
 
         row.set_child(Some(&card));
         listbox.append(&row);
@@ -133,8 +122,10 @@ pub(super) fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
     listbox.connect_row_activated({
         let main_loop = main_loop.clone();
         let chosen_index = chosen_index.clone();
+        let window = window.clone();
         move |_, row| {
             *chosen_index.borrow_mut() = usize::try_from(row.index()).ok();
+            window.close();
             main_loop.quit();
         }
     });
@@ -143,9 +134,11 @@ pub(super) fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
         let main_loop = main_loop.clone();
         let chosen_index = chosen_index.clone();
         let listbox = listbox.clone();
+        let window = window.clone();
         move |_| {
             if let Some(row) = listbox.selected_row() {
                 *chosen_index.borrow_mut() = usize::try_from(row.index()).ok();
+                window.close();
                 main_loop.quit();
             }
         }
@@ -153,7 +146,11 @@ pub(super) fn choose_vm(vms: &[VmSummary]) -> Result<Option<VmSummary>> {
 
     cancel_button.connect_clicked({
         let main_loop = main_loop.clone();
-        move |_| main_loop.quit()
+        let window = window.clone();
+        move |_| {
+            window.close();
+            main_loop.quit();
+        }
     });
 
     window.connect_close_request({
