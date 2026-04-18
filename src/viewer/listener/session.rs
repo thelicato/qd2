@@ -101,6 +101,14 @@ pub(super) async fn listener_session(
             }
             maybe_input = input_rx.recv() => match maybe_input {
                 Some(input) => {
+                    if let InputEvent::ClipboardViewerFocused(focused) = &input {
+                        clipboard::debug(format!("listener received ClipboardViewerFocused({focused})"));
+                        if let Some(clipboard) = &clipboard {
+                            clipboard.set_viewer_focused(*focused);
+                        }
+                        continue;
+                    }
+
                     if let InputEvent::ClipboardHostChanged(selection, content) = &input {
                         clipboard::debug(format!(
                             "listener received ClipboardHostChanged selection={selection:?}: {}",

@@ -91,7 +91,9 @@ impl RemoteConsole {
                 .release(keycode)
                 .await
                 .with_context(|| format!("failed to send key release for qnum {keycode}")),
-            InputEvent::ClipboardHostChanged(_, _) => Ok(()),
+            InputEvent::ClipboardViewerFocused(_) | InputEvent::ClipboardHostChanged(_, _) => {
+                Ok(())
+            }
             InputEvent::MousePress(button) => self
                 .mouse
                 .press(button)

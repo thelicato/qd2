@@ -187,6 +187,7 @@ struct SelectionUiState {
     ignored_remote_content: Option<ClipboardContent>,
     last_seen_content: Option<ClipboardContent>,
     pending_guest_content: Option<ClipboardContent>,
+    awaiting_remote_echo: bool,
 }
 
 impl ClipboardUiState {
@@ -262,7 +263,15 @@ pub(super) fn install_host_clipboard_bridge(
         let input_tx = input_tx.clone();
         move |_| {
             debug("viewer focus entered");
+            let _ = input_tx.send(InputEvent::ClipboardViewerFocused(true));
             refresh_clipboard_state(&picture, &ui_state, &input_tx)
+        }
+    });
+    focus.connect_leave({
+        let input_tx = input_tx.clone();
+        move |_| {
+            debug("viewer focus left");
+            let _ = input_tx.send(InputEvent::ClipboardViewerFocused(false));
         }
     });
     picture.add_controller(focus);
@@ -293,6 +302,9 @@ pub(super) fn install_host_clipboard_bridge(
             if window.is_active() {
                 debug("window became active");
                 refresh_clipboard_state(&picture, &ui_state, &input_tx);
+            } else {
+                debug("window became inactive");
+                let _ = input_tx.send(InputEvent::ClipboardViewerFocused(false));
             }
         }
     });
@@ -330,6 +342,7 @@ pub(super) fn apply_guest_clipboard(
         selection_state.ignored_remote_content = Some(content.clone());
         selection_state.last_seen_content = (!content.is_empty()).then_some(content.clone());
         selection_state.pending_guest_content = None;
+        selection_state.awaiting_remote_echo = true;
     }
     debug(format!("gtk set_content succeeded for {selection:?}"));
     Ok(())
@@ -373,6 +386,14 @@ pub(super) struct ClipboardSession {
 }
 
 impl ClipboardSession {
+    pub(super) fn set_viewer_focused(&self, focused: bool) {
+        let mut shared = self.shared.lock().expect("clipboard mutex was poisoned");
+        if shared.viewer_focused != focused {
+            shared.viewer_focused = focused;
+            debug(format!("viewer clipboard focus -> {focused}"));
+        }
+    }
+
     /// Publish the current host clipboard to the guest or release ownership if
     /// the host selection no longer contains any MIME types QD2 can forward.
     pub(super) async fn update_host_content(
@@ -468,10 +489,24 @@ impl ClipboardSession {
     }
 }
 
+fn should_accept_remote_grab(
+    current_serial: u32,
+    local_owner: bool,
+    viewer_focused: bool,
+    incoming_serial: u32,
+) -> bool {
+    if viewer_focused && local_owner {
+        return true;
+    }
+
+    incoming_serial > current_serial || (incoming_serial == current_serial && !local_owner)
+}
+
 #[derive(Default)]
 struct ClipboardBridgeState {
     clipboard: SelectionBridgeState,
     primary: SelectionBridgeState,
+    viewer_focused: bool,
 }
 
 #[derive(Default)]
@@ -547,6 +582,7 @@ impl ClipboardHandler for ClipboardListener {
 
         {
             let mut shared = self.shared.lock().expect("clipboard mutex was poisoned");
+            let viewer_focused = shared.viewer_focused;
             let Some(selection_state) = shared.selection_mut(selection) else {
                 debug(format!(
                     "ignoring unsupported guest clipboard selection {selection:?}"
@@ -554,14 +590,26 @@ impl ClipboardHandler for ClipboardListener {
                 return;
             };
 
-            if serial < selection_state.current_serial
-                || (serial == selection_state.current_serial && selection_state.local_owner)
-            {
+            if !should_accept_remote_grab(
+                selection_state.current_serial,
+                selection_state.local_owner,
+                viewer_focused,
+                serial,
+            ) {
                 debug(format!(
                     "ignoring stale/conflicting grab: current_serial={} local_owner={}",
                     selection_state.current_serial, selection_state.local_owner
                 ));
                 return;
+            }
+            if viewer_focused
+                && selection_state.local_owner
+                && serial <= selection_state.current_serial
+            {
+                debug(format!(
+                    "accepting guest grab while viewer is focused despite local serial {}",
+                    selection_state.current_serial
+                ));
             }
             selection_state.current_serial = serial;
             selection_state.local_owner = false;
@@ -939,8 +987,21 @@ fn finish_host_snapshot(
             "ignoring GTK clipboard echo from remote-set content for {selection:?}"
         ));
         selection_state.ignored_remote_content = None;
+        selection_state.awaiting_remote_echo = false;
         selection_state.last_seen_content = (!content.is_empty()).then_some(content);
         return;
+    }
+
+    if selection_state.awaiting_remote_echo && content.is_empty() {
+        debug(format!(
+            "ignoring transient empty GTK clipboard snapshot after remote set for {selection:?}"
+        ));
+        return;
+    }
+
+    if selection_state.awaiting_remote_echo {
+        selection_state.awaiting_remote_echo = false;
+        selection_state.ignored_remote_content = None;
     }
 
     if selection_state.last_seen_content.as_ref() == Some(&content) {
@@ -1106,7 +1167,7 @@ mod tests {
     use super::{
         ClipboardContent, ClipboardSelection, IMAGE_PNG, STRING, TEXT, TEXT_HTML, TEXT_PLAIN,
         TEXT_PLAIN_UTF8, TEXT_URI_LIST, UTF8_STRING, canonical_rich_mime,
-        preferred_text_request_mimes, remote_fetch_plan,
+        preferred_text_request_mimes, remote_fetch_plan, should_accept_remote_grab,
     };
 
     #[test]
@@ -1187,5 +1248,12 @@ mod tests {
         let plan = remote_fetch_plan(&[TEXT_PLAIN_UTF8.to_owned()]);
         assert_eq!(ClipboardSelection::Primary as u32, 1);
         assert_eq!(plan[0].requested_mimes, vec![TEXT_PLAIN_UTF8]);
+    }
+
+    #[test]
+    fn focused_viewer_allows_guest_grab_to_override_local_owner() {
+        assert!(should_accept_remote_grab(5, true, true, 0));
+        assert!(!should_accept_remote_grab(5, true, false, 0));
+        assert!(should_accept_remote_grab(5, false, false, 6));
     }
 }

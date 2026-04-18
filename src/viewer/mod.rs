@@ -972,6 +972,7 @@ enum ViewerEvent {
 enum InputEvent {
     KeyPress(u32),
     KeyRelease(u32),
+    ClipboardViewerFocused(bool),
     ClipboardHostChanged(ClipboardSelection, Option<clipboard::ClipboardContent>),
     MousePress(MouseButton),
     MouseRelease(MouseButton),
