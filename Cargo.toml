@@ -20,8 +20,8 @@ tokio = { version = "1.51.1", features = ["macros", "rt-multi-thread", "sync", "
 zbus = "5.14.0"
 
 [package.metadata.deb]
-maintainer = "QD2 maintainers"
-copyright = "2026 QD2 contributors"
+maintainer = "Angelo Delicato <thelicato@duck.com>"
+copyright = "thelicato"
 license-file = ["LICENSE", "0"]
 extended-description = """\
 QD2 is a Rust and GTK4 client for QEMU's D-Bus display stack. It can discover

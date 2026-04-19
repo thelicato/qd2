@@ -109,6 +109,39 @@ Some features have extra requirements:
 - DMABUF scanout import is currently Linux-specific and depends on the host GTK stack and GPU/render node support
 - Private libvirt sockets often require ACLs or group membership if you want to run QD2 without `sudo`
 
+## 📋 Clipboard Setup
+
+If `qd2 connect` works but copy and paste do not, the missing piece is usually the guest-agent channel, not QD2 itself.
+
+For plain QEMU, add a `qemu-vdagent` chardev plus a matching virtio serial port:
+
+```bash
+-chardev qemu-vdagent,id=charchannel1,name=vdagent,clipboard=on \
+-device '{"driver":"virtserialport","bus":"virtio-serial0.0","nr":2,"chardev":"charchannel1","id":"channel1","name":"com.redhat.spice.0"}'
+```
+
+That is the same shape QD2 expects when it inspects clipboard support.
+
+For libvirt or `virt-manager`, the equivalent XML is a `qemu-vdagent` channel. If the UI does not expose it directly, open the XML editor and add:
+
+```xml
+<channel type='qemu-vdagent'>
+  <source>
+    <clipboard copypaste='yes'/>
+  </source>
+  <target type='virtio' name='com.redhat.spice.0'/>
+</channel>
+```
+
+Inside the guest:
+
+- X11 desktops usually need the regular `spice-vdagent` session agent running.
+- Wayland guests, especially Hyprland or wlroots-based sessions, may need a Wayland-native guest agent instead of the traditional X11-focused `spice-vdagent`.
+
+For Wayland guests, see [`paprika-vdagent`](https://github.com/thelicato/paprika-vdagent), a standalone Wayland SPICE guest agent that was built specifically for clipboard support without relying on X11 clipboard mirroring.
+
+When clipboard still does not work, `qd2 inspect` and `qd2 doctor` are the quickest way to confirm whether QEMU is exporting both the D-Bus clipboard object and the guest-agent channel.
+
 ## 🌍 Platform Notes
 
 - Release artifacts are produced for Linux on both `x86_64` and `arm64`.
