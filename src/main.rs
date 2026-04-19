@@ -68,6 +68,7 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
         args.hotkeys.as_deref(),
         args.fullscreen,
         args.undecorated,
+        args.dmabuf_partial_updates,
     )
 }
 

@@ -390,9 +390,12 @@ impl DmabufPresentation {
         &mut self,
         display: &gdk::Display,
         updates: &[UpdateDMABUF],
+        partial_updates: bool,
     ) -> Result<()> {
-        let update_region = dmabuf_update_region(updates, self.width, self.height);
-        let previous_texture = self.texture.clone();
+        let update_region = partial_updates
+            .then(|| dmabuf_update_region(updates, self.width, self.height))
+            .flatten();
+        let previous_texture = partial_updates.then(|| self.texture.clone());
 
         self.texture = build_dmabuf_texture(
             display,
@@ -405,7 +408,7 @@ impl DmabufPresentation {
             self.modifier,
             self.num_planes,
             update_region.as_ref(),
-            Some(&previous_texture),
+            previous_texture.as_ref(),
         )?;
 
         Ok(())
@@ -433,8 +436,10 @@ impl DmabufPresenter {
         &mut self,
         display: &gdk::Display,
         updates: &[UpdateDMABUF],
+        partial_updates: bool,
     ) -> Result<()> {
-        self.presentation.refresh(display, updates)?;
+        self.presentation
+            .refresh(display, updates, partial_updates)?;
         self.paintable
             .update_from_presentation(&self.presentation, self.transform);
         Ok(())

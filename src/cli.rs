@@ -93,6 +93,12 @@ pub struct ConnectArgs {
     /// Open the viewer without normal window decorations.
     #[arg(long)]
     pub undecorated: bool,
+
+    /// Use QEMU-provided DMABUF damage rectangles instead of full-surface
+    /// refreshes. This can be faster, but some guest/driver combinations may
+    /// flicker.
+    #[arg(long = "dpu")]
+    pub dmabuf_partial_updates: bool,
 }
 
 impl ConnectArgs {

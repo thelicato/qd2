@@ -42,11 +42,13 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--verbose` | Print extra discovery and viewer diagnostics. | `qd2 --verbose doctor` |
 | `--fullscreen` | Start the GTK4 viewer directly in fullscreen mode for `connect`. | `qd2 connect --fullscreen` |
 | `--undecorated` | Open the GTK4 viewer without normal window decorations for `connect`. | `qd2 connect --undecorated` |
+| `--dpu` | Use QEMU-provided DMABUF damage rectangles instead of the default full-surface DMABUF refresh path. | `qd2 connect --dpu` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights
 
 - Software and DMABUF-backed display rendering.
+- Safe full-surface DMABUF refresh by default, with optional partial-update mode for guests that handle damage rectangles correctly.
 - Keyboard and mouse forwarding with grab and release behavior.
 - Guest cursor shape and visibility updates.
 - Clipboard sync for text, HTML, URI lists, images, and primary selection support where available.

@@ -125,6 +125,7 @@ pub fn connect(
     hotkeys_spec: Option<&str>,
     start_fullscreen: bool,
     undecorated: bool,
+    dmabuf_partial_updates: bool,
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
@@ -155,6 +156,7 @@ pub fn connect(
         hotkeys,
         start_fullscreen,
         undecorated,
+        dmabuf_partial_updates,
     );
 
     let _ = shutdown_tx.send(());
@@ -174,6 +176,7 @@ fn run_window(
     hotkeys: hotkeys::ViewerHotkeys,
     start_fullscreen: bool,
     undecorated: bool,
+    dmabuf_partial_updates: bool,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -583,6 +586,8 @@ fn run_window(
             let mut frame_patches = Vec::new();
             #[cfg(unix)]
             let mut dmabuf_updates = Vec::new();
+            #[cfg(unix)]
+            let mut prefer_dmabuf = current_dmabuf.borrow().is_some();
             let mut latest_guest_clipboard = None;
             let mut latest_guest_primary = None;
             let mut latest_cursor_shape = None;
@@ -598,11 +603,22 @@ fn run_window(
 
                 match event {
                     Ok(ViewerEvent::Frame(frame)) => {
+                        #[cfg(unix)]
+                        if prefer_dmabuf {
+                            continue;
+                        }
                         latest_presentation = Some(PresentationEvent::Frame(frame))
                     }
-                    Ok(ViewerEvent::FramePatch(patch)) => frame_patches.push(patch),
+                    Ok(ViewerEvent::FramePatch(patch)) => {
+                        #[cfg(unix)]
+                        if prefer_dmabuf {
+                            continue;
+                        }
+                        frame_patches.push(patch)
+                    }
                     #[cfg(unix)]
                     Ok(ViewerEvent::Dmabuf(scanout)) => {
+                        prefer_dmabuf = true;
                         latest_presentation = Some(PresentationEvent::Dmabuf(scanout))
                     }
                     #[cfg(unix)]
@@ -783,7 +799,11 @@ fn run_window(
                 let refreshed = {
                     let mut current_dmabuf = current_dmabuf.borrow_mut();
                     match current_dmabuf.as_mut() {
-                        Some(presenter) => match presenter.refresh(&display, &dmabuf_updates) {
+                        Some(presenter) => match presenter.refresh(
+                            &display,
+                            &dmabuf_updates,
+                            dmabuf_partial_updates,
+                        ) {
                             Ok(()) => Ok(Some(())),
                             Err(error) => Err(error),
                         },
