@@ -146,10 +146,9 @@ pub(super) async fn listener_session(
                                     if detected_mode != mouse_mode {
                                         mouse_mode = detected_mode;
                                         let _ = event_tx.send(ViewerEvent::MouseModeChanged(detected_mode));
-                                        true
-                                    } else {
-                                        false
                                     }
+                                    let _ = event_tx.send(ViewerEvent::ClearStatus);
+                                    true
                                 }
                                 Err(mode_error) => {
                                     let _ = event_tx.send(ViewerEvent::Status(format!(

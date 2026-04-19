@@ -593,6 +593,7 @@ fn run_window(
             let mut latest_cursor_shape = None;
             let mut latest_cursor_visible = None;
             let mut latest_status = None;
+            let mut clear_status = false;
             let mut disconnected = false;
 
             loop {
@@ -641,7 +642,9 @@ fn run_window(
                             &input_grab,
                             &mouse_mode,
                         );
+                        clear_status = true;
                     }
+                    Ok(ViewerEvent::ClearStatus) => clear_status = true,
                     Ok(ViewerEvent::Status(message)) => latest_status = Some(message),
                     Ok(ViewerEvent::Disconnected) => disconnected = true,
                     Err(TryRecvError::Empty) => break,
@@ -729,6 +732,8 @@ fn run_window(
                             latest_status = Some(format!(
                                 "Could not prepare the framebuffer for display: {error:#}"
                             ));
+                        } else {
+                            clear_status = true;
                         }
 
                         #[cfg(unix)]
@@ -751,6 +756,7 @@ fn run_window(
                                     &presenter,
                                 );
                                 *current_dmabuf.borrow_mut() = Some(presenter);
+                                clear_status = true;
                             }
                             Err(error) => {
                                 *current_dmabuf.borrow_mut() = None;
@@ -777,7 +783,7 @@ fn run_window(
                 })();
 
                 match patched {
-                    Ok(Some(())) => {}
+                    Ok(Some(())) => clear_status = true,
                     Ok(None) => {
                         if latest_status.is_none() {
                             latest_status = Some(
@@ -812,7 +818,7 @@ fn run_window(
                 };
 
                 match refreshed {
-                    Ok(Some(())) => {}
+                    Ok(Some(())) => clear_status = true,
                     Ok(None) => {
                         if latest_status.is_none() {
                             latest_status = Some(
@@ -844,6 +850,8 @@ fn run_window(
             if let Some(message) = latest_status {
                 status_label.set_label(&message);
                 status_label.set_visible(true);
+            } else if clear_status {
+                status_label.set_visible(false);
             }
 
             glib::ControlFlow::Continue
@@ -984,6 +992,7 @@ enum ViewerEvent {
     CursorShapeChanged(Option<cursor::GuestCursor>),
     CursorVisibilityChanged(bool),
     MouseModeChanged(MouseMode),
+    ClearStatus,
     Status(String),
     Disconnected,
 }
