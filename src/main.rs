@@ -43,6 +43,11 @@ async fn main() -> Result<()> {
 }
 
 async fn run_connect_command(args: ConnectArgs) -> Result<()> {
+    // Set the identity before any GTK initialization, including the VM chooser
+    // or an error dialog shown if discovery or option validation fails.
+    if let Some(name) = args.name.as_deref() {
+        gtk4::glib::set_prgname(Some(name));
+    }
     let head_layout = cli::parse_head_layout(args.head_layout.as_deref())?;
     let target = if let Some(selector) = args.vm.as_deref() {
         qemu::resolve_connect_target(args.address(), Some(selector), args.console).await?

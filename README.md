@@ -48,6 +48,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--dpu` | Use QEMU-provided DMABUF damage rectangles instead of the default full-surface DMABUF refresh path. | `qd2 connect --dpu` |
 | `--no-offload` | Disable compositor graphics offload and use the normal GTK rendering path. | `qd2 connect --no-offload` |
 | `--no-clipboard` | Disable clipboard sharing in both directions. | `qd2 connect --no-clipboard` |
+| `--name <APP_ID>` | Set the GTK application identity for window rules and launcher grouping. | `qd2 connect --name org.example.QD2.WorkVM` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights

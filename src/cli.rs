@@ -114,6 +114,10 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub no_clipboard: bool,
 
+    /// Set the GTK program identity used for application grouping and window rules.
+    #[arg(long, value_name = "APP_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub name: Option<String>,
+
     /// With `--fullscreen`: which monitor to fill, by connector name
     /// (`DP-1`, `HDMI-A-1`), model name, or 0-based index in the display's
     /// monitor list. Without it the window manager picks the monitor the
