@@ -124,6 +124,7 @@ pub fn connect(
     requested_address: Option<&str>,
     hotkeys_spec: Option<&str>,
     start_fullscreen: bool,
+    fullscreen_monitor: Option<&str>,
     undecorated: bool,
     dmabuf_partial_updates: bool,
 ) -> Result<()> {
@@ -155,6 +156,7 @@ pub fn connect(
         input_tx,
         hotkeys,
         start_fullscreen,
+        fullscreen_monitor,
         undecorated,
         dmabuf_partial_updates,
     );
@@ -175,6 +177,7 @@ fn run_window(
     input_tx: tokio_mpsc::UnboundedSender<InputEvent>,
     hotkeys: hotkeys::ViewerHotkeys,
     start_fullscreen: bool,
+    fullscreen_monitor: Option<&str>,
     undecorated: bool,
     dmabuf_partial_updates: bool,
 ) -> Result<()> {
@@ -891,11 +894,119 @@ fn run_window(
 
     window.present();
     if start_fullscreen {
-        window.fullscreen();
+        match fullscreen_monitor.and_then(find_monitor) {
+            Some(monitor) => window.fullscreen_on_monitor(&monitor),
+            None => {
+                if let Some(spec) = fullscreen_monitor {
+                    eprintln!(
+                        "QD2: no monitor matches `--monitor {spec}` (known: {}); falling back to the window manager's choice",
+                        describe_monitors()
+                    );
+                }
+                window.fullscreen();
+            }
+        }
     }
     picture.grab_focus();
     main_loop.run();
     Ok(())
+}
+
+/// Resolve a `--monitor` spec against the default display's monitors.
+fn find_monitor(spec: &str) -> Option<gdk::Monitor> {
+    let monitors = list_monitors();
+    let labels: Vec<(Option<String>, Option<String>)> = monitors
+        .iter()
+        .map(|m| {
+            (
+                m.connector().map(|s| s.to_string()),
+                m.model().map(|s| s.to_string()),
+            )
+        })
+        .collect();
+    match_monitor(spec, &labels).map(|index| monitors[index].clone())
+}
+
+/// Pure matching so it can be unit-tested without a display: connector name
+/// first, then model, then a 0-based index. Case-insensitive.
+fn match_monitor(spec: &str, monitors: &[(Option<String>, Option<String>)]) -> Option<usize> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let eq = |candidate: &Option<String>| {
+        candidate
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(spec))
+    };
+    if let Some(i) = monitors.iter().position(|(connector, _)| eq(connector)) {
+        return Some(i);
+    }
+    if let Some(i) = monitors.iter().position(|(_, model)| eq(model)) {
+        return Some(i);
+    }
+    spec.parse::<usize>().ok().filter(|i| *i < monitors.len())
+}
+
+fn list_monitors() -> Vec<gdk::Monitor> {
+    let Some(display) = gdk::Display::default() else {
+        return Vec::new();
+    };
+    let model = display.monitors();
+    (0..model.n_items())
+        .filter_map(|i| model.item(i).and_downcast::<gdk::Monitor>())
+        .collect()
+}
+
+fn describe_monitors() -> String {
+    let monitors = list_monitors();
+    if monitors.is_empty() {
+        return "none".to_owned();
+    }
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let geometry = m.geometry();
+            format!(
+                "{i}={}/{} {}x{}+{}+{}",
+                m.connector().as_deref().unwrap_or("?"),
+                m.model().as_deref().unwrap_or("?"),
+                geometry.width(),
+                geometry.height(),
+                geometry.x(),
+                geometry.y()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::match_monitor;
+
+    fn mons() -> Vec<(Option<String>, Option<String>)> {
+        vec![
+            (Some("DP-1".into()), Some("DELL U2719D".into())),
+            (Some("HDMI-1".into()), None),
+        ]
+    }
+
+    #[test]
+    fn matches_connector_case_insensitively() {
+        assert_eq!(match_monitor("hdmi-1", &mons()), Some(1));
+        assert_eq!(match_monitor(" DP-1 ", &mons()), Some(0));
+    }
+
+    #[test]
+    fn falls_back_to_model_then_index() {
+        assert_eq!(match_monitor("DELL U2719D", &mons()), Some(0));
+        assert_eq!(match_monitor("1", &mons()), Some(1));
+        assert_eq!(match_monitor("2", &mons()), None);
+        assert_eq!(match_monitor("", &mons()), None);
+        assert_eq!(match_monitor("DP-2", &mons()), None);
+    }
 }
 
 enum PresentationEvent {

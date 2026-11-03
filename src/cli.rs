@@ -99,6 +99,12 @@ pub struct ConnectArgs {
     /// flicker.
     #[arg(long = "dpu")]
     pub dmabuf_partial_updates: bool,
+    /// With `--fullscreen`: which monitor to fill, by connector name
+    /// (`DP-1`, `HDMI-A-1`), model name, or 0-based index in the display's
+    /// monitor list. Without it the window manager picks the monitor the
+    /// window happens to appear on, which is not stable across launches.
+    #[arg(long, value_name = "CONNECTOR|MODEL|INDEX")]
+    pub monitor: Option<String>,
 }
 
 impl ConnectArgs {
