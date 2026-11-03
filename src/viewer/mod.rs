@@ -131,6 +131,7 @@ pub fn connect(
     no_fullscreen_bar: bool,
     dmabuf_partial_updates: bool,
     no_offload: bool,
+    grab_on_focus: bool,
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
@@ -165,6 +166,7 @@ pub fn connect(
         no_fullscreen_bar,
         dmabuf_partial_updates,
         no_offload,
+        grab_on_focus,
     );
 
     let _ = shutdown_tx.send(());
@@ -188,6 +190,7 @@ fn run_window(
     no_fullscreen_bar: bool,
     dmabuf_partial_updates: bool,
     no_offload: bool,
+    grab_on_focus: bool,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -458,7 +461,8 @@ fn run_window(
     let cursor_state = Rc::new(RefCell::new(cursor::CursorState::new(cursor_scene)));
     cursor_scene::track_pointer(&picture, &cursor_state);
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
-    let input_grab = grab::new_state();
+    let input_grab = grab::new_state(grab_on_focus);
+    grab::install_shortcut_recovery(&window, &picture, &input_grab);
     let keyboard_controller = ready.keyboard_available.then(|| {
         keyboard::install_keyboard_controller(
             &picture,
@@ -526,7 +530,12 @@ fn run_window(
         let input_grab = input_grab.clone();
         let keyboard_controller = keyboard_controller.clone();
         move |window| {
+            let activated = grab::activate_on_focus(window, &picture, &input_grab);
             if window.is_active() {
+                if activated {
+                    ui_state.borrow_mut().last_pointer_guest_position = None;
+                    grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
+                }
                 return;
             }
 
@@ -871,6 +880,11 @@ fn run_window(
                 }
                 window.close();
                 return glib::ControlFlow::Break;
+            }
+
+            if grab::activate_on_focus(&window, &picture, &input_grab) {
+                ui_state.borrow_mut().last_pointer_guest_position = None;
+                grab::sync_cursor_capture(&picture, &cursor_state, &input_grab, &mouse_mode);
             }
 
             if let Some(message) = latest_status {

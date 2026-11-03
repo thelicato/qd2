@@ -90,6 +90,11 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub fullscreen: bool,
 
+    /// Grab guest input when the window gains focus, once a frame is available.
+    /// After releasing the grab, click the display or refocus the window to grab again.
+    #[arg(long)]
+    pub grab_on_focus: bool,
+
     /// Open the viewer without normal window decorations.
     #[arg(long)]
     pub undecorated: bool,

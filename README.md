@@ -41,6 +41,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--address <DBUS_ADDRESS>` | Target a specific private D-Bus socket instead of auto-discovery. | `qd2 inspect --address "unix:path=<path_to_sock>"` |
 | `--verbose` | Print extra discovery and viewer diagnostics. | `qd2 --verbose doctor` |
 | `--fullscreen` | Start the GTK4 viewer directly in fullscreen mode for `connect`. | `qd2 connect --fullscreen` |
+| `--grab-on-focus` | Grab input when the window gains focus and a guest frame is available. | `qd2 connect --grab-on-focus` |
 | `--monitor <CONNECTOR\|MODEL\|INDEX>` | Choose the monitor for initial fullscreen by connector, model, or zero-based index. | `qd2 connect --fullscreen --monitor DP-1` |
 | `--head-layout <ID:X,Y;...>` | Set console positions in the guest desktop when a shared-framebuffer layout is unavailable. Negative offsets are supported. | `qd2 connect -c 1 --head-layout "0:0,0;1:-1920,0"` |
 | `--undecorated` | Open the GTK4 viewer without normal window decorations for `connect`. | `qd2 connect --undecorated` |
@@ -70,6 +71,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Top-bar actions for taking screenshots and sending guest shortcuts like `Ctrl+Alt+Delete`.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
 - Press and release bare `Ctrl+Alt` to release the input grab. Guest shortcuts such as `Ctrl+Alt+Arrow` keep the grab; custom release bindings such as `release-cursor=ctrl+q` fire on key press.
+- Input is grabbed by clicking the guest display by default. With `--grab-on-focus`, focusing the window also grabs input once a frame is available. Releasing the grab keeps it released until you click the display or focus the window again.
 - A VM chooser for the multi-VM `connect` flow.
 
 ### Multi-head guests
