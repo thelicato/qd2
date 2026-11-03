@@ -77,6 +77,7 @@ pub(super) fn sync_cursor_capture(
 ) {
     let capture_hidden = is_active(input_grab) && *mouse_mode.borrow() == MouseMode::Relative;
     let mut cursor_state = cursor_state.borrow_mut();
+    cursor_state.set_mouse_mode(*mouse_mode.borrow());
     cursor_state.set_capture_hidden(capture_hidden);
     cursor_state.apply_to_widget(picture);
 }

@@ -58,7 +58,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - DMABUF scanouts preserve each console's view within a shared backing framebuffer, including when display flips or rotations are applied.
 - Safe full-surface DMABUF refresh by default, with optional partial-update mode for guests that handle damage rectangles correctly.
 - Keyboard and mouse forwarding with grab and release behavior.
-- Guest cursor shape and visibility updates.
+- Guest cursor shape and visibility updates, with framebuffer-scaled cursors in absolute mouse mode. Releasing relative-mode capture restores the normal host pointer.
 - Clipboard sync for text, HTML, URI lists, images, and primary selection support where available.
 - Host clipboard changes are coalesced before reading, and outdated reads are discarded. Copied file lists retain a plain-text URL fallback for pasting into text fields.
 - Guest audio playback through the QEMU D-Bus audio interface.

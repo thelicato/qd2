@@ -3,6 +3,7 @@ mod chooser;
 mod chrome;
 mod clipboard;
 mod cursor;
+mod cursor_scene;
 mod dmabuf;
 mod events;
 mod framebuffer;
@@ -213,7 +214,14 @@ fn run_window(
     status_label.set_margin_start(12);
     status_label.set_margin_end(12);
 
-    let overlay = display_overlay(&picture, &status_label, no_offload);
+    let ui_state = Rc::new(RefCell::new(UiState::default()));
+    let cursor_scene = cursor_scene::CursorScene::new(&picture, ui_state.clone());
+    let overlay = display_overlay(
+        &picture,
+        &status_label,
+        no_offload,
+        Some(cursor_scene.upcast_ref()),
+    );
 
     let window = gtk::Window::builder()
         .title(&ready.title)
@@ -237,7 +245,6 @@ fn run_window(
     let title_label = gtk::Label::new(Some(&ready.title));
     title_label.add_css_class("viewer-title");
 
-    let ui_state = Rc::new(RefCell::new(UiState::default()));
     let hotkeys = Rc::new(hotkeys);
     let screenshot_action: Rc<dyn Fn()> = Rc::new({
         let window = window.clone();
@@ -448,7 +455,8 @@ fn run_window(
     picture.add_controller(viewer_shortcuts);
 
     let clipboard_state = Rc::new(RefCell::new(clipboard::ClipboardUiState::default()));
-    let cursor_state = Rc::new(RefCell::new(cursor::CursorState::default()));
+    let cursor_state = Rc::new(RefCell::new(cursor::CursorState::new(cursor_scene)));
+    cursor_scene::track_pointer(&picture, &cursor_state);
     let mouse_mode = Rc::new(RefCell::new(ready.mouse_mode));
     let input_grab = grab::new_state();
     let keyboard_controller = ready.keyboard_available.then(|| {
@@ -708,6 +716,7 @@ fn run_window(
             }
 
             if let Some(presentation) = latest_presentation {
+                cursor_state.borrow().redraw();
                 match presentation {
                     PresentationEvent::Frame(frame) => {
                         let presented = (|| -> anyhow::Result<()> {
@@ -930,6 +939,7 @@ fn display_overlay(
     picture: &gtk::Picture,
     status_label: &gtk::Label,
     no_offload: bool,
+    cursor_scene: Option<&gtk::Widget>,
 ) -> gtk::Overlay {
     let overlay = gtk::Overlay::new();
     if no_offload {
@@ -942,6 +952,10 @@ fn display_overlay(
         offload.set_vexpand(true);
         offload.set_enabled(gtk::GraphicsOffloadEnabled::Enabled);
         overlay.set_child(Some(&offload));
+    }
+    if let Some(scene) = cursor_scene {
+        overlay.add_overlay(scene);
+        overlay.set_measure_overlay(scene, false);
     }
     // Status changes must not alter the allocation used for guest auto-resize.
     overlay.add_overlay(status_label);

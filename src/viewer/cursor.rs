@@ -6,7 +6,6 @@ use gtk4 as gtk;
 use qemu_display::Cursor as QemuCursor;
 
 const CURSOR_BYTES_PER_PIXEL: usize = 4;
-const HIDDEN_CURSOR_PIXEL: [u8; CURSOR_BYTES_PER_PIXEL] = [0, 0, 0, 0];
 
 #[derive(Clone, Debug)]
 pub(super) struct GuestCursor {
@@ -55,7 +54,7 @@ impl GuestCursor {
         }))
     }
 
-    fn to_gdk_cursor(&self) -> gdk::Cursor {
+    fn to_texture(&self) -> (gdk::Texture, i32, i32) {
         let bytes = glib::Bytes::from_owned(self.rgba.clone());
         let texture = gdk::MemoryTexture::new(
             self.width,
@@ -64,8 +63,7 @@ impl GuestCursor {
             &bytes,
             self.stride(),
         );
-        let fallback = gdk::Cursor::from_name("default", None);
-        gdk::Cursor::from_texture(&texture, self.hotspot_x, self.hotspot_y, fallback.as_ref())
+        (texture.upcast(), self.hotspot_x, self.hotspot_y)
     }
 
     fn stride(&self) -> usize {
@@ -90,64 +88,89 @@ fn argb32_words_to_rgba(src: &[u8]) -> Vec<u8> {
 pub(super) struct CursorState {
     visible: bool,
     capture_hidden: bool,
-    active_cursor: Option<gdk::Cursor>,
-    hidden_cursor: Option<gdk::Cursor>,
-}
-
-impl Default for CursorState {
-    fn default() -> Self {
-        Self {
-            visible: true,
-            capture_hidden: false,
-            active_cursor: None,
-            hidden_cursor: None,
-        }
-    }
+    has_shape: bool,
+    pointer_inside: bool,
+    mouse_mode: super::mouse::MouseMode,
+    scene: super::cursor_scene::CursorScene,
 }
 
 impl CursorState {
+    pub(super) fn new(scene: super::cursor_scene::CursorScene) -> Self {
+        Self {
+            visible: true,
+            capture_hidden: false,
+            has_shape: false,
+            pointer_inside: false,
+            mouse_mode: super::mouse::MouseMode::Disabled,
+            scene,
+        }
+    }
+
     pub(super) fn set_shape(&mut self, shape: Option<GuestCursor>) {
-        self.active_cursor = shape.as_ref().map(GuestCursor::to_gdk_cursor);
+        self.has_shape = shape.is_some();
+        self.scene
+            .set_shape(shape.as_ref().map(GuestCursor::to_texture));
     }
 
     pub(super) fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+        self.scene.set_cursor_visible(visible);
     }
 
     pub(super) fn set_capture_hidden(&mut self, capture_hidden: bool) {
         self.capture_hidden = capture_hidden;
     }
 
-    pub(super) fn apply_to_widget(&mut self, widget: &impl IsA<gtk::Widget>) {
-        if !self.visible || self.capture_hidden {
-            let hidden = self.hidden_cursor();
-            widget.set_cursor(Some(&hidden));
-            return;
-        }
-
-        widget.set_cursor(self.active_cursor.as_ref());
+    pub(super) fn set_mouse_mode(&mut self, mode: super::mouse::MouseMode) {
+        self.mouse_mode = mode;
+        self.scene.set_mouse_mode(mode);
     }
 
-    fn hidden_cursor(&mut self) -> gdk::Cursor {
-        self.hidden_cursor
-            .get_or_insert_with(|| {
-                let bytes = glib::Bytes::from_static(&HIDDEN_CURSOR_PIXEL);
-                let texture = gdk::MemoryTexture::new(
-                    1,
-                    1,
-                    gdk::MemoryFormat::R8g8b8a8,
-                    &bytes,
-                    CURSOR_BYTES_PER_PIXEL,
-                );
-                gdk::Cursor::from_texture(&texture, 0, 0, None)
-            })
-            .clone()
+    pub(super) fn set_pointer(&mut self, pointer: Option<(f64, f64)>) {
+        self.pointer_inside = pointer.is_some();
+        self.scene.set_pointer(pointer);
+    }
+
+    pub(super) fn redraw(&self) {
+        self.scene.queue_draw();
+    }
+
+    pub(super) fn apply_to_widget(&self, widget: &impl IsA<gtk::Widget>) {
+        if hide_host_cursor(
+            self.mouse_mode,
+            self.capture_hidden,
+            self.visible,
+            self.has_shape,
+            self.pointer_inside,
+        ) {
+            if widget.cursor().and_then(|cursor| cursor.name()).as_deref() != Some("none") {
+                widget.set_cursor_from_name(Some("none"));
+            }
+        } else if widget.cursor().is_some() {
+            widget.set_cursor(None::<&gdk::Cursor>);
+        }
+    }
+}
+
+fn hide_host_cursor(
+    mode: super::mouse::MouseMode,
+    capture_hidden: bool,
+    visible: bool,
+    has_shape: bool,
+    pointer_inside: bool,
+) -> bool {
+    use super::mouse::MouseMode;
+    match mode {
+        MouseMode::Absolute => pointer_inside && (has_shape || !visible),
+        MouseMode::Relative => capture_hidden,
+        MouseMode::Disabled => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GuestCursor, argb32_words_to_rgba};
+    use super::{GuestCursor, argb32_words_to_rgba, hide_host_cursor};
+    use crate::viewer::mouse::MouseMode;
     use qemu_display::Cursor as QemuCursor;
 
     #[test]
@@ -194,5 +217,73 @@ mod tests {
 
         #[cfg(target_endian = "big")]
         assert_eq!(rgba, vec![0x34, 0x56, 0x78, 0x12]);
+    }
+
+    #[test]
+    fn relative_release_restores_host_pointer_regardless_of_guest_shape_or_visibility() {
+        for visible in [true, false] {
+            for shape in [true, false] {
+                assert!(!hide_host_cursor(
+                    MouseMode::Relative,
+                    false,
+                    visible,
+                    shape,
+                    true
+                ));
+                assert!(hide_host_cursor(
+                    MouseMode::Relative,
+                    true,
+                    visible,
+                    shape,
+                    true
+                ));
+                assert!(!hide_host_cursor(
+                    MouseMode::Disabled,
+                    true,
+                    visible,
+                    shape,
+                    true
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_cursor_hides_host_only_over_the_picture_when_replaced_or_guest_hidden() {
+        assert!(hide_host_cursor(
+            MouseMode::Absolute,
+            false,
+            true,
+            true,
+            true
+        ));
+        assert!(hide_host_cursor(
+            MouseMode::Absolute,
+            false,
+            false,
+            false,
+            true
+        ));
+        assert!(!hide_host_cursor(
+            MouseMode::Absolute,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(!hide_host_cursor(
+            MouseMode::Absolute,
+            false,
+            true,
+            true,
+            false
+        ));
+        assert!(!hide_host_cursor(
+            MouseMode::Absolute,
+            false,
+            false,
+            true,
+            false
+        ));
     }
 }

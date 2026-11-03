@@ -163,7 +163,7 @@ mod tests {
             status.set_wrap(true);
             status.set_can_target(false);
             status.set_visible(false);
-            let overlay = super::super::display_overlay(&picture, &status, no_offload);
+            let overlay = super::super::display_overlay(&picture, &status, no_offload, None);
             let window = gtk::Window::builder()
                 .default_width(640)
                 .default_height(480)
