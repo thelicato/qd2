@@ -1,7 +1,7 @@
 use std::{cell::RefCell, convert::TryFrom, rc::Rc};
 
 use anyhow::{Context, Result, bail};
-use gtk::{cairo, gdk, glib, prelude::*};
+use gtk::{cairo, gdk, glib, gsk, prelude::*};
 use gtk4 as gtk;
 #[cfg(unix)]
 use qemu_display::ScanoutDMABUF;
@@ -14,12 +14,83 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
 use super::UiState;
 
+/// The part of a DMABUF that a console actually shows, in texture pixels.
+///
+/// X11 guests render every output into one framebuffer and scan each head out
+/// of a sub-rectangle of it, so QEMU hands us the whole backing buffer plus
+/// this window into it (`ScanoutDMABUF2`). The texture must be imported at its
+/// real backing size — describing a tiled buffer with the sub-rectangle's
+/// width but the backing stride makes Mesa reject the import (EGL_BAD_ALLOC).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct DmabufView {
+    pub(super) x: u32,
+    pub(super) y: u32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
+impl DmabufView {
+    pub(super) fn full(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Clamp a view to the backing buffer; a nonsensical view degrades to the
+    /// whole buffer instead of an empty picture.
+    pub(super) fn clamped(self, backing_width: u32, backing_height: u32) -> Self {
+        if self.width == 0
+            || self.height == 0
+            || self.x >= backing_width
+            || self.y >= backing_height
+        {
+            return Self::full(backing_width, backing_height);
+        }
+        Self {
+            x: self.x,
+            y: self.y,
+            width: self.width.min(backing_width - self.x),
+            height: self.height.min(backing_height - self.y),
+        }
+    }
+}
+
+pub(super) fn scanout_geometry(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    backing_width: u32,
+    backing_height: u32,
+) -> (u32, u32, DmabufView) {
+    if backing_width == 0 || backing_height == 0 {
+        // Without backing dimensions the legacy scanout is already the full view.
+        (width, height, DmabufView::full(width, height))
+    } else {
+        (
+            backing_width,
+            backing_height,
+            DmabufView {
+                x,
+                y,
+                width,
+                height,
+            }
+            .clamped(backing_width, backing_height),
+        )
+    }
+}
+
 #[cfg(unix)]
 pub(super) struct DmabufPresentation {
     texture: gdk::Texture,
     fds: Vec<OwnedFd>,
     width: u32,
     height: u32,
+    view: DmabufView,
     offset: [u32; 4],
     stride: [u32; 4],
     fourcc: u32,
@@ -89,6 +160,8 @@ pub(super) struct DmabufFrame {
     pub(super) modifier: u64,
     pub(super) y0_top: bool,
     pub(super) num_planes: u32,
+    /// Sub-rectangle of the (`width` x `height`) texture this console shows.
+    pub(super) view: DmabufView,
 }
 
 #[cfg(unix)]
@@ -113,9 +186,12 @@ impl DmabufFrame {
             modifier,
             y0_top,
             num_planes,
+            DmabufView::full(width, height),
         )
     }
 
+    /// `width`/`height` are the backing buffer's dimensions; `view` selects the
+    /// part of it this console scans out (clamped to the buffer).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_from_raw_parts(
         raw_fds: [i32; 4],
@@ -127,6 +203,7 @@ impl DmabufFrame {
         modifier: u64,
         y0_top: bool,
         num_planes: u32,
+        view: DmabufView,
     ) -> Result<Self> {
         let plane_count = usize::try_from(num_planes).context("invalid DMABUF plane count")?;
         if plane_count == 0 || plane_count > 4 {
@@ -153,6 +230,7 @@ impl DmabufFrame {
             modifier,
             y0_top,
             num_planes,
+            view: view.clamped(width, height),
         })
     }
 }
@@ -170,6 +248,7 @@ struct PaintableState {
     texture: Option<gdk::Texture>,
     width: u32,
     height: u32,
+    view: DmabufView,
     y0_top: bool,
     transform: DmabufViewTransform,
 }
@@ -181,6 +260,7 @@ impl Default for PaintableState {
             texture: None,
             width: 0,
             height: 0,
+            view: DmabufView::full(0, 0),
             y0_top: true,
             transform: DmabufViewTransform::default(),
         }
@@ -194,69 +274,136 @@ impl PaintableState {
         presentation: &DmabufPresentation,
         transform: DmabufViewTransform,
     ) -> bool {
-        let size_changed = self.width != presentation.width || self.height != presentation.height;
+        let size_changed = self.view.width != presentation.view.width
+            || self.view.height != presentation.view.height;
         self.texture = Some(presentation.texture.clone());
         self.width = presentation.width;
         self.height = presentation.height;
+        self.view = presentation.view;
         self.y0_top = presentation.y0_top;
         self.transform = transform;
         size_changed
     }
 
     fn intrinsic_width(&self) -> i32 {
-        i32::try_from(self.width).unwrap_or(i32::MAX)
+        i32::try_from(self.view.width).unwrap_or(i32::MAX)
     }
 
     fn intrinsic_height(&self) -> i32 {
-        i32::try_from(self.height).unwrap_or(i32::MAX)
+        i32::try_from(self.view.height).unwrap_or(i32::MAX)
     }
 
     fn intrinsic_aspect_ratio(&self) -> f64 {
-        if self.height == 0 {
+        if self.view.height == 0 {
             0.0
         } else {
-            f64::from(self.width) / f64::from(self.height)
+            f64::from(self.view.width) / f64::from(self.view.height)
         }
     }
 
     fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
-        let Some(texture) = self.texture.as_ref() else {
-            return;
+        if let Some(node) = self.render_node(width as f32, height as f32) {
+            snapshot.append_node(&node);
+        }
+    }
+
+    fn render_node(&self, width: f32, height: f32) -> Option<gsk::RenderNode> {
+        let texture = self.texture.as_ref()?;
+        if !width.is_finite()
+            || !height.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+            || self.view.width == 0
+            || self.view.height == 0
+        {
+            return None;
+        }
+        let rotation = self.transform.rotation_quarters % 4;
+        let (view_width, view_height) = if rotation % 2 == 0 {
+            (width, height)
+        } else {
+            (height, width)
         };
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
-
-        let width = width as f32;
-        let height = height as f32;
-        let bounds = gtk::graphene::Rect::new(0.0, 0.0, width, height);
-
-        snapshot.save();
-
-        match self.transform.rotation_quarters % 4 {
-            0 => {}
-            1 => {
-                snapshot.translate(&gtk::graphene::Point::new(height, 0.0));
-                snapshot.rotate(90.0);
-            }
-            2 => {
-                snapshot.translate(&gtk::graphene::Point::new(width, height));
-                snapshot.rotate(180.0);
-            }
-            3 => {
-                snapshot.translate(&gtk::graphene::Point::new(0.0, width));
-                snapshot.rotate(270.0);
-            }
-            _ => unreachable!(),
-        }
-
+        let (full, shift) =
+            view_placement(self.view, self.width, self.height, view_width, view_height);
+        let bounds = gtk::graphene::Rect::new(0.0, 0.0, view_width, view_height);
+        let texture_bounds =
+            gtk::graphene::Rect::new(shift.x(), shift.y(), full.width(), full.height());
+        let texture_node = gsk::TextureNode::new(texture, &texture_bounds);
+        // Crop first. Flipping the backing buffer before cropping selects a
+        // different head when its view is not vertically centered.
+        let mut node: gsk::RenderNode = gsk::ClipNode::new(&texture_node, &bounds).upcast();
         if dmabuf_needs_vertical_flip(self.y0_top, self.transform) {
-            snapshot.translate(&gtk::graphene::Point::new(0.0, height));
-            snapshot.scale(1.0, -1.0);
+            let flip = gsk::Transform::new()
+                .translate(&gtk::graphene::Point::new(0.0, view_height))
+                .scale(1.0, -1.0);
+            node = gsk::TransformNode::new(&node, &flip).upcast();
         }
+        let transform = match rotation {
+            0 => return Some(node),
+            1 => gsk::Transform::new()
+                .translate(&gtk::graphene::Point::new(width, 0.0))
+                .rotate(90.0),
+            2 => gsk::Transform::new()
+                .translate(&gtk::graphene::Point::new(width, height))
+                .rotate(180.0),
+            3 => gsk::Transform::new()
+                .translate(&gtk::graphene::Point::new(0.0, height))
+                .rotate(270.0),
+            _ => unreachable!(),
+        };
+        Some(gsk::TransformNode::new(&node, &transform).upcast())
+    }
+}
 
-        snapshot.append_texture(texture, &bounds);
-        snapshot.restore();
+/// Where the full backing texture goes so that `view` lands exactly on a
+/// `dest_width` x `dest_height` destination: the scaled backing rectangle and
+/// the translation to apply before drawing it.
+#[cfg(unix)]
+fn view_placement(
+    view: DmabufView,
+    backing_width: u32,
+    backing_height: u32,
+    dest_width: f32,
+    dest_height: f32,
+) -> (gtk::graphene::Rect, gtk::graphene::Point) {
+    let (scale_x, scale_y) = view_scale(view, dest_width, dest_height);
+    let full = gtk::graphene::Rect::new(
+        0.0,
+        0.0,
+        backing_width as f32 * scale_x,
+        backing_height as f32 * scale_y,
+    );
+    let shift = gtk::graphene::Point::new(-(view.x as f32) * scale_x, -(view.y as f32) * scale_y);
+    (full, shift)
+}
+
+fn view_scale(view: DmabufView, dest_width: f32, dest_height: f32) -> (f32, f32) {
+    let scale_x = if view.width == 0 {
+        1.0
+    } else {
+        dest_width / view.width as f32
+    };
+    let scale_y = if view.height == 0 {
+        1.0
+    } else {
+        dest_height / view.height as f32
+    };
+    (scale_x, scale_y)
+}
+
+/// Console-relative damage rectangles arrive in view coordinates; the GTK
+/// update region is in texture coordinates.
+fn shift_update_into_backing(update: UpdateDMABUF, view: DmabufView) -> UpdateDMABUF {
+    UpdateDMABUF {
+        x: update
+            .x
+            .saturating_add(i32::try_from(view.x).unwrap_or(i32::MAX)),
+        y: update
+            .y
+            .saturating_add(i32::try_from(view.y).unwrap_or(i32::MAX)),
+        w: update.w,
+        h: update.h,
     }
 }
 
@@ -377,6 +524,7 @@ impl DmabufPresentation {
             fds: scanout.fds,
             width: scanout.width,
             height: scanout.height,
+            view: scanout.view,
             offset: scanout.offset,
             stride: scanout.stride,
             fourcc: scanout.fourcc,
@@ -393,7 +541,13 @@ impl DmabufPresentation {
         partial_updates: bool,
     ) -> Result<()> {
         let update_region = partial_updates
-            .then(|| dmabuf_update_region(updates, self.width, self.height))
+            .then(|| {
+                let shifted = updates
+                    .iter()
+                    .map(|update| shift_update_into_backing(*update, self.view))
+                    .collect::<Vec<_>>();
+                dmabuf_update_region(&shifted, self.width, self.height)
+            })
             .flatten();
         let previous_texture = partial_updates.then(|| self.texture.clone());
 
@@ -455,12 +609,13 @@ impl DmabufPresenter {
         self.paintable.upcast_ref()
     }
 
+    /// Size of what the console shows (the view), not of the backing texture.
     fn width(&self) -> u32 {
-        self.presentation.width
+        self.presentation.view.width
     }
 
     fn height(&self) -> u32 {
-        self.presentation.height
+        self.presentation.view.height
     }
 }
 
@@ -601,6 +756,213 @@ pub(super) fn dmabuf_update_rectangle(
     }
 
     Some(cairo::RectangleInt::new(x0, y0, x1 - x0, y1 - y0))
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::{DmabufView, scanout_geometry, shift_update_into_backing, view_scale};
+    use qemu_display::UpdateDMABUF;
+
+    #[test]
+    fn full_view_is_identity() {
+        let view = DmabufView::full(2560, 1440);
+        assert_eq!(view_scale(view, 2560.0, 1440.0), (1.0, 1.0));
+        assert_eq!(view_scale(view, 1280.0, 720.0), (0.5, 0.5));
+        let update = UpdateDMABUF {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+        let shifted = shift_update_into_backing(update, view);
+        assert_eq!((shifted.x, shifted.y), (10, 20));
+    }
+
+    #[test]
+    fn second_head_of_an_x11_screen() {
+        // 4480x1440 X screen: head 1 shows 1920x1080 at (2560, 360).
+        let view = DmabufView {
+            x: 2560,
+            y: 360,
+            width: 1920,
+            height: 1080,
+        }
+        .clamped(4480, 1440);
+        assert_eq!(
+            (view.x, view.y, view.width, view.height),
+            (2560, 360, 1920, 1080)
+        );
+        let shifted = shift_update_into_backing(
+            UpdateDMABUF {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            view,
+        );
+        assert_eq!((shifted.x, shifted.y), (2560, 360));
+    }
+
+    #[test]
+    fn nonsense_views_fall_back_to_the_whole_buffer() {
+        let full = DmabufView::full(4480, 1440);
+        assert_eq!(
+            DmabufView {
+                x: 5000,
+                y: 0,
+                width: 10,
+                height: 10
+            }
+            .clamped(4480, 1440),
+            full
+        );
+        assert_eq!(
+            DmabufView {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 10
+            }
+            .clamped(4480, 1440),
+            full
+        );
+        let oversize = DmabufView {
+            x: 2560,
+            y: 360,
+            width: 5000,
+            height: 5000,
+        }
+        .clamped(4480, 1440);
+        assert_eq!((oversize.width, oversize.height), (1920, 1080));
+    }
+
+    #[test]
+    fn legacy_scanouts_ignore_offsets_without_backing_dimensions() {
+        assert_eq!(
+            scanout_geometry(100, 50, 640, 480, 0, 0),
+            (640, 480, DmabufView::full(640, 480))
+        );
+        assert_eq!(
+            scanout_geometry(100, 50, 640, 480, 1024, 0),
+            (640, 480, DmabufView::full(640, 480))
+        );
+        assert_eq!(
+            scanout_geometry(2560, 360, 1920, 1080, 4480, 1440),
+            (
+                4480,
+                1440,
+                DmabufView {
+                    x: 2560,
+                    y: 360,
+                    width: 1920,
+                    height: 1080
+                },
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires GTK initialization; can run with the Broadway backend"]
+    fn rendered_pixels_stay_in_the_selected_view_for_every_flip_and_rotation() {
+        use super::{DmabufViewTransform, PaintableState};
+        use gtk::{cairo, gdk, glib, prelude::*};
+        use gtk4 as gtk;
+
+        gtk::init().expect("GTK display required");
+
+        fn pixel(x: u32, y: u32) -> [u8; 4] {
+            [(x * 24) as u8, (y * 24) as u8, 64, 255]
+        }
+
+        let bytes: Vec<_> = (0..8)
+            .flat_map(|y| (0..8).flat_map(move |x| pixel(x, y)))
+            .collect();
+        let texture = gdk::MemoryTexture::new(
+            8,
+            8,
+            gdk::MemoryFormat::R8g8b8a8,
+            &glib::Bytes::from_owned(bytes),
+            8 * 4,
+        )
+        .upcast::<gdk::Texture>();
+        // Full-buffer, top-half and offset views all use the production render path.
+        for view in [
+            DmabufView::full(8, 8),
+            DmabufView::full(8, 4),
+            DmabufView {
+                x: 2,
+                y: 1,
+                width: 3,
+                height: 2,
+            },
+        ] {
+            for y0_top in [true, false] {
+                for extra_vertical_flip in [false, true] {
+                    for rotation_quarters in 0..4 {
+                        let (width, height) = if rotation_quarters % 2 == 0 {
+                            (view.width, view.height)
+                        } else {
+                            (view.height, view.width)
+                        };
+                        let state = PaintableState {
+                            texture: Some(texture.clone()),
+                            width: 8,
+                            height: 8,
+                            view,
+                            y0_top,
+                            transform: DmabufViewTransform {
+                                rotation_quarters,
+                                extra_vertical_flip,
+                            },
+                        };
+                        let node = state.render_node(width as f32, height as f32).unwrap();
+                        let mut image = cairo::ImageSurface::create(
+                            cairo::Format::ARgb32,
+                            width as i32,
+                            height as i32,
+                        )
+                        .unwrap();
+                        {
+                            let cr = cairo::Context::new(&image).unwrap();
+                            node.draw(&cr);
+                        }
+                        image.flush();
+                        let stride = image.stride() as usize;
+                        let data = image.data().unwrap();
+                        for y in 0..view.height {
+                            for x in 0..view.width {
+                                let flipped_y = if !y0_top ^ extra_vertical_flip {
+                                    view.height - 1 - y
+                                } else {
+                                    y
+                                };
+                                let (dx, dy) = match rotation_quarters {
+                                    0 => (x, flipped_y),
+                                    1 => (view.height - 1 - flipped_y, x),
+                                    2 => (view.width - 1 - x, view.height - 1 - flipped_y),
+                                    3 => (flipped_y, view.width - 1 - x),
+                                    _ => unreachable!(),
+                                };
+                                let offset = dy as usize * stride + dx as usize * 4;
+                                let actual = u32::from_ne_bytes(
+                                    data[offset..offset + 4].try_into().unwrap(),
+                                );
+                                let [r, g, b, _] = pixel(view.x + x, view.y + y);
+                                let expected =
+                                    0xff000000 | (r as u32) << 16 | (g as u32) << 8 | b as u32;
+                                assert_eq!(
+                                    actual, expected,
+                                    "view={view:?} y0_top={y0_top} flip={extra_vertical_flip} rotation={rotation_quarters} pixel=({dx},{dy})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

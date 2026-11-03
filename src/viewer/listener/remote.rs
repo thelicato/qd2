@@ -434,19 +434,31 @@ impl LocalConsoleListenerDmabuf2 {
     async fn scanout_dmabuf(
         &mut self,
         fd: Vec<Fd<'_>>,
-        _x: u32,
-        _y: u32,
+        x: u32,
+        y: u32,
         width: u32,
         height: u32,
         offset: Vec<u32>,
         stride: Vec<u32>,
         num_planes: u32,
         fourcc: u32,
-        _backing_width: u32,
-        _backing_height: u32,
+        backing_width: u32,
+        backing_height: u32,
         modifier: u64,
         y0_top: bool,
     ) -> zbus::fdo::Result<()> {
+        // The buffer is `backing_width` x `backing_height`; this console shows
+        // the (x, y, width, height) window of it. X11 guests scan every head
+        // out of one shared framebuffer, so the two differ whenever the guest
+        // has more than one output. Older QEMUs report a zero backing size.
+        let (texture_width, texture_height, view) = super::super::dmabuf::scanout_geometry(
+            x,
+            y,
+            width,
+            height,
+            backing_width,
+            backing_height,
+        );
         let mut fds = [-1; 4];
         for (index, fd) in fd.into_iter().take(4).enumerate() {
             let owned = fd
@@ -468,7 +480,16 @@ impl LocalConsoleListenerDmabuf2 {
 
         self.shared.with_handler(|handler| {
             match super::super::dmabuf::DmabufFrame::try_from_raw_parts(
-                fds, width, height, offsets, strides, fourcc, modifier, y0_top, num_planes,
+                fds,
+                texture_width,
+                texture_height,
+                offsets,
+                strides,
+                fourcc,
+                modifier,
+                y0_top,
+                num_planes,
+                view,
             ) {
                 Ok(scanout) => handler.emit_dmabuf_scanout(scanout),
                 Err(error) => handler.send_status(format!("Unsupported DMABUF scanout: {error:#}")),

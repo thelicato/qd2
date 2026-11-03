@@ -50,6 +50,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 ## 🖥️ Viewer Highlights
 
 - Software and DMABUF-backed display rendering.
+- DMABUF scanouts preserve each console's view within a shared backing framebuffer, including when display flips or rotations are applied.
 - Safe full-surface DMABUF refresh by default, with optional partial-update mode for guests that handle damage rectangles correctly.
 - Keyboard and mouse forwarding with grab and release behavior.
 - Guest cursor shape and visibility updates.
