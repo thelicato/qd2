@@ -75,6 +75,7 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
         args.undecorated,
         args.no_fullscreen_bar,
         args.dmabuf_partial_updates,
+        args.no_offload,
     )
 }
 

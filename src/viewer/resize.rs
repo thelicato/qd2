@@ -148,62 +148,106 @@ mod tests {
         }
 
         gtk::init().expect("GTK display required");
-        let picture = gtk::Picture::new();
-        picture.set_hexpand(true);
-        picture.set_vexpand(true);
-        let status = gtk::Label::new(None);
-        status.set_wrap(true);
-        status.set_visible(false);
-        let overlay = super::super::display_overlay(&picture, &status);
-        let window = gtk::Window::builder()
-            .default_width(640)
-            .default_height(480)
-            .child(&overlay)
-            .build();
-        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
-        install(&window, &picture, tx);
-        window.present();
-        // Allocate explicitly so a Broadway server needs no browser client.
-        overlay.allocate(640, 480, -1, None);
-        settle();
-        let first = rx.try_recv();
-        assert!(
-            matches!(first, Ok(InputEvent::UiInfo { width, height }) if width > 0 && height > 0),
-            "initial resize: {first:?}; mapped={}, visible={}, allocation={}x{}",
-            window.is_mapped(),
-            picture.is_visible(),
-            picture.width(),
-            picture.height()
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "initial layout should coalesce into one request"
-        );
-        let size = (picture.width(), picture.height());
+        for no_offload in [false, true] {
+            let picture = gtk::Picture::new();
+            picture.set_hexpand(true);
+            picture.set_vexpand(true);
+            picture.set_paintable(Some(&gtk::gdk::MemoryTexture::new(
+                2,
+                2,
+                gtk::gdk::MemoryFormat::R8g8b8a8,
+                &glib::Bytes::from_owned([255_u8, 0, 0, 255].repeat(4)),
+                8,
+            )));
+            let status = gtk::Label::new(None);
+            status.set_wrap(true);
+            status.set_can_target(false);
+            status.set_visible(false);
+            let overlay = super::super::display_overlay(&picture, &status, no_offload);
+            let window = gtk::Window::builder()
+                .default_width(640)
+                .default_height(480)
+                .decorated(false)
+                .child(&overlay)
+                .build();
+            let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+            install(&window, &picture, tx);
+            window.present();
+            // Allocate explicitly so a Broadway server needs no browser client.
+            overlay.allocate(640, 480, -1, None);
+            settle();
+            let first = rx.try_recv();
+            assert!(
+                matches!(first, Ok(InputEvent::UiInfo { width, height }) if width > 0 && height > 0),
+                "initial resize: {first:?}; mapped={}, visible={}, allocation={}x{}",
+                window.is_mapped(),
+                picture.is_visible(),
+                picture.width(),
+                picture.height()
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "initial layout should coalesce into one request"
+            );
+            let size = (picture.width(), picture.height());
 
-        status.set_label(&"Guest resize request failed. ".repeat(30));
-        status.set_visible(true);
-        overlay.allocate(640, 480, -1, None);
-        settle();
-        assert_eq!((picture.width(), picture.height()), size);
-        assert!(
-            rx.try_recv().is_err(),
-            "status text changed the guest resize target"
-        );
-        status.set_visible(false);
-        overlay.allocate(640, 480, -1, None);
-        settle();
-        assert_eq!((picture.width(), picture.height()), size);
-        assert!(rx.try_recv().is_err());
+            // A software texture must remain visible when offload is unavailable.
+            let snapshot = gtk::Snapshot::new();
+            gtk::WidgetPaintable::new(Some(&overlay)).snapshot(
+                &snapshot,
+                overlay.width() as f64,
+                overlay.height() as f64,
+            );
+            let node = snapshot
+                .to_node()
+                .expect("display should produce render content");
+            let mut image = gtk::cairo::ImageSurface::create(
+                gtk::cairo::Format::ARgb32,
+                overlay.width(),
+                overlay.height(),
+            )
+            .unwrap();
+            {
+                let context = gtk::cairo::Context::new(&image).unwrap();
+                node.draw(&context);
+            }
+            image.flush();
+            let offset = (overlay.height() / 2 * image.stride() + overlay.width() / 2 * 4) as usize;
+            let pixels = image.data().unwrap();
+            assert_eq!(
+                u32::from_ne_bytes(pixels[offset..offset + 4].try_into().unwrap()),
+                0xffff0000
+            );
+            drop(pixels);
 
-        window.set_default_size(800, 600);
-        window.set_visible(false);
-        settle();
-        assert!(
-            rx.try_recv().is_err(),
-            "hidden window sent a pending resize"
-        );
-        window.destroy();
+            status.set_label(&"Guest resize request failed. ".repeat(30));
+            status.set_visible(true);
+            overlay.allocate(size.0, size.1, -1, None);
+            settle();
+            assert_eq!((picture.width(), picture.height()), size);
+            assert_eq!(
+                overlay.pick(100.0, 100.0, gtk::PickFlags::empty()),
+                Some(picture.clone().upcast::<gtk::Widget>())
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "status text changed the guest resize target"
+            );
+            status.set_visible(false);
+            overlay.allocate(size.0, size.1, -1, None);
+            settle();
+            assert_eq!((picture.width(), picture.height()), size);
+            assert!(rx.try_recv().is_err());
+
+            window.set_default_size(800, 600);
+            window.set_visible(false);
+            settle();
+            assert!(
+                rx.try_recv().is_err(),
+                "hidden window sent a pending resize"
+            );
+            window.destroy();
+        }
     }
 
     #[test]

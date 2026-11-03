@@ -104,6 +104,12 @@ pub struct ConnectArgs {
     /// flicker.
     #[arg(long = "dpu")]
     pub dmabuf_partial_updates: bool,
+
+    /// Render through GTK without attempting compositor graphics offload.
+    /// Useful as a fallback for compositor or driver rendering problems.
+    #[arg(long)]
+    pub no_offload: bool,
+
     /// With `--fullscreen`: which monitor to fill, by connector name
     /// (`DP-1`, `HDMI-A-1`), model name, or 0-based index in the display's
     /// monitor list. Without it the window manager picks the monitor the

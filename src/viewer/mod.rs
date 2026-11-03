@@ -129,6 +129,7 @@ pub fn connect(
     undecorated: bool,
     no_fullscreen_bar: bool,
     dmabuf_partial_updates: bool,
+    no_offload: bool,
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
         .context("failed to parse `--hotkeys` overrides")?;
@@ -162,6 +163,7 @@ pub fn connect(
         undecorated,
         no_fullscreen_bar,
         dmabuf_partial_updates,
+        no_offload,
     );
 
     let _ = shutdown_tx.send(());
@@ -184,6 +186,7 @@ fn run_window(
     undecorated: bool,
     no_fullscreen_bar: bool,
     dmabuf_partial_updates: bool,
+    no_offload: bool,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
 
@@ -210,7 +213,7 @@ fn run_window(
     status_label.set_margin_start(12);
     status_label.set_margin_end(12);
 
-    let overlay = display_overlay(&picture, &status_label);
+    let overlay = display_overlay(&picture, &status_label, no_offload);
 
     let window = gtk::Window::builder()
         .title(&ready.title)
@@ -923,9 +926,23 @@ fn run_window(
     Ok(())
 }
 
-fn display_overlay(picture: &gtk::Picture, status_label: &gtk::Label) -> gtk::Overlay {
+fn display_overlay(
+    picture: &gtk::Picture,
+    status_label: &gtk::Label,
+    no_offload: bool,
+) -> gtk::Overlay {
     let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(picture));
+    if no_offload {
+        overlay.set_child(Some(picture));
+    } else {
+        // GTK 4.14 can offload eligible content and composite it normally when
+        // the backend, transforms, or overlapping controls prevent offload.
+        let offload = gtk::GraphicsOffload::new(Some(picture));
+        offload.set_hexpand(true);
+        offload.set_vexpand(true);
+        offload.set_enabled(gtk::GraphicsOffloadEnabled::Enabled);
+        overlay.set_child(Some(&offload));
+    }
     // Status changes must not alter the allocation used for guest auto-resize.
     overlay.add_overlay(status_label);
     overlay.set_measure_overlay(status_label, false);

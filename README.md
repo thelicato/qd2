@@ -46,11 +46,13 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--undecorated` | Open the GTK4 viewer without normal window decorations for `connect`. | `qd2 connect --undecorated` |
 | `--no-fullscreen-bar` | Hide the floating fullscreen toolbar and its hover hotspot. | `qd2 connect --fullscreen --no-fullscreen-bar` |
 | `--dpu` | Use QEMU-provided DMABUF damage rectangles instead of the default full-surface DMABUF refresh path. | `qd2 connect --dpu` |
+| `--no-offload` | Disable compositor graphics offload and use the normal GTK rendering path. | `qd2 connect --no-offload` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights
 
 - Software and DMABUF-backed display rendering.
+- Compositor graphics offload for eligible frames on supported Linux/Wayland setups, with automatic GTK rendering fallback. Use `--no-offload` to disable it; the minimum GTK version remains 4.14.
 - DMABUF scanouts preserve each console's view within a shared backing framebuffer, including when display flips or rotations are applied.
 - Safe full-surface DMABUF refresh by default, with optional partial-update mode for guests that handle damage rectangles correctly.
 - Keyboard and mouse forwarding with grab and release behavior.
