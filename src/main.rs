@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_connect_command(args: ConnectArgs) -> Result<()> {
+    let head_layout = cli::parse_head_layout(args.head_layout.as_deref())?;
     let target = if let Some(selector) = args.vm.as_deref() {
         qemu::resolve_connect_target(args.address(), Some(selector), args.console).await?
     } else {
@@ -62,6 +63,9 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
         }
     };
     print_warnings(&target.warnings);
+    let mut target = target;
+    cli::validate_head_layout(&head_layout, &target.console_ids)?;
+    target.head_layout = head_layout;
     viewer::connect(
         target,
         args.address(),

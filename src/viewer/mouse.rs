@@ -48,7 +48,7 @@ pub(super) fn install_mouse_controllers(
             if !grab::is_active(&input_grab) {
                 activate_grab(gesture.current_event());
             }
-            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y, true);
 
             if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
                 let _ = input_tx.send(InputEvent::MousePress(button));
@@ -65,7 +65,7 @@ pub(super) fn install_mouse_controllers(
             if !grab::is_active(&input_grab) {
                 return;
             }
-            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y);
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y, false);
 
             if let Some(button) = gtk_button_to_qemu(gesture.current_button()) {
                 let _ = input_tx.send(InputEvent::MouseRelease(button));
@@ -75,17 +75,26 @@ pub(super) fn install_mouse_controllers(
     picture.add_controller(click);
 
     let motion = gtk::EventControllerMotion::new();
+    // Absolute pointing follows the hovering pointer without a grab, like
+    // spice viewers do: on a multi-head guest the pointer wanders from one
+    // head's window into the next without anyone clicking first. Relative
+    // mode keeps requiring the grab (it warps the host pointer).
+    let forwards_motion = {
+        let mouse_mode = mouse_mode.clone();
+        let input_grab = input_grab.clone();
+        move || grab::is_active(&input_grab) || *mouse_mode.borrow() == MouseMode::Absolute
+    };
     motion.connect_enter({
         let picture = picture.clone();
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
         let mouse_mode = mouse_mode.clone();
-        let input_grab = input_grab.clone();
+        let forwards_motion = forwards_motion.clone();
         move |_, x, y| {
-            if !grab::is_active(&input_grab) {
+            if !forwards_motion() {
                 return;
             }
-            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y, false)
         }
     });
     motion.connect_motion({
@@ -93,12 +102,12 @@ pub(super) fn install_mouse_controllers(
         let ui_state = ui_state.clone();
         let input_tx = input_tx.clone();
         let mouse_mode = mouse_mode.clone();
-        let input_grab = input_grab.clone();
+        let forwards_motion = forwards_motion.clone();
         move |_, x, y| {
-            if !grab::is_active(&input_grab) {
+            if !forwards_motion() {
                 return;
             }
-            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y)
+            sync_mouse_position(&picture, &ui_state, &input_tx, &mouse_mode, x, y, false)
         }
     });
     motion.connect_leave({
@@ -144,6 +153,7 @@ fn sync_mouse_position(
     mouse_mode: &Rc<RefCell<MouseMode>>,
     x: f64,
     y: f64,
+    refresh_layout: bool,
 ) {
     let frame_size = ui_state.borrow().frame_size;
     let Some((frame_width, frame_height)) = frame_size else {
@@ -168,13 +178,14 @@ fn sync_mouse_position(
             let _ = input_tx.send(InputEvent::MouseAbs {
                 x: guest_x,
                 y: guest_y,
+                refresh_layout,
             });
             ui_state.last_pointer_guest_position = Some((guest_x, guest_y));
         }
         MouseMode::Relative => {
             if let Some((prev_x, prev_y)) = ui_state.last_pointer_guest_position {
-                let dx = guest_x as i32 - prev_x as i32;
-                let dy = guest_y as i32 - prev_y as i32;
+                let dx = guest_x.saturating_sub(prev_x);
+                let dy = guest_y.saturating_sub(prev_y);
                 if dx != 0 || dy != 0 {
                     let _ = input_tx.send(InputEvent::MouseRel { dx, dy });
                 }
@@ -228,8 +239,13 @@ fn gtk_button_to_qemu(button: u32) -> Option<MouseButton> {
     }
 }
 
-/// Convert the pointer coordinates from the GTK widget into guest coordinates,
-/// compensating for the letterboxing introduced by `ContentFit::Contain`.
+/// Convert the pointer coordinates from the GTK widget into guest coordinates
+/// of THIS head, compensating for the letterboxing introduced by
+/// `ContentFit::Contain`. Positions outside the displayed area (letterbox
+/// margins, or — during a drag, thanks to the compositor's implicit grab — far
+/// beyond the window) are returned unclamped: the input session either clamps
+/// them to the head or continues them onto a neighboring head of a multi-head
+/// guest, so a drag flows across the seam between two viewer windows.
 pub(super) fn widget_coords_to_guest_position(
     widget_width: i32,
     widget_height: i32,
@@ -237,7 +253,7 @@ pub(super) fn widget_coords_to_guest_position(
     frame_height: u32,
     x: f64,
     y: f64,
-) -> Option<(u32, u32)> {
+) -> Option<(i32, i32)> {
     if widget_width <= 0 || widget_height <= 0 || frame_width == 0 || frame_height == 0 {
         return None;
     }
@@ -255,20 +271,14 @@ pub(super) fn widget_coords_to_guest_position(
     let display_height = frame_height_f * scale;
     let x_offset = (widget_width - display_width) / 2.0;
     let y_offset = (widget_height - display_height) / 2.0;
-    // Pointer positions in the letterbox margins are clamped onto the nearest
-    // display edge rather than dropped: with a margin, the host pointer parks
-    // in the margin when pushed against the screen edge, and dropping those
-    // events left the guest cursor a few rows short of its own edge — so
-    // edge-triggered UI (auto-hide panels, hot corners) never fired.
-    let local_x = (x - x_offset).clamp(0.0, display_width);
-    let local_y = (y - y_offset).clamp(0.0, display_height);
-
+    let local_x = x - x_offset;
+    let local_y = y - y_offset;
     let guest_x = (local_x / scale)
         .floor()
-        .clamp(0.0, f64::from(frame_width.saturating_sub(1))) as u32;
+        .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
     let guest_y = (local_y / scale)
         .floor()
-        .clamp(0.0, f64::from(frame_height.saturating_sub(1))) as u32;
+        .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
 
     Some((guest_x, guest_y))
 }

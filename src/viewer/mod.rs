@@ -1109,7 +1109,7 @@ struct ViewerReady {
 #[derive(Default)]
 struct UiState {
     frame_size: Option<(u32, u32)>,
-    last_pointer_guest_position: Option<(u32, u32)>,
+    last_pointer_guest_position: Option<(i32, i32)>,
 }
 
 enum ViewerEvent {
@@ -1136,10 +1136,20 @@ enum InputEvent {
     ClipboardHostChanged(ClipboardSelection, Option<clipboard::ClipboardContent>),
     MousePress(MouseButton),
     MouseRelease(MouseButton),
-    MouseAbs { x: u32, y: u32 },
-    MouseRel { dx: i32, dy: i32 },
+    MouseAbs {
+        x: i32,
+        y: i32,
+        refresh_layout: bool,
+    },
+    MouseRel {
+        dx: i32,
+        dy: i32,
+    },
     MouseWheel(MouseButton),
-    UiInfo { width: u32, height: u32 },
+    UiInfo {
+        width: u32,
+        height: u32,
+    },
 }
 
 #[cfg(test)]
@@ -1233,7 +1243,11 @@ mod tests {
 
     #[test]
     fn mouse_mode_is_only_rechecked_for_motion_inputs() {
-        assert!(input_needs_mouse_mode(&InputEvent::MouseAbs { x: 1, y: 2 }));
+        assert!(input_needs_mouse_mode(&InputEvent::MouseAbs {
+            x: 1,
+            y: 2,
+            refresh_layout: false
+        }));
         assert!(input_needs_mouse_mode(&InputEvent::MouseRel {
             dx: 3,
             dy: -4
@@ -1250,15 +1264,16 @@ mod tests {
             widget_coords_to_guest_position(800, 600, 640, 480, 400.0, 300.0),
             Some((320, 240))
         );
-        // in the letterbox margin: clamped onto the top edge, not dropped
+        // in the letterbox margin: reported as-is (one row above the top);
+        // the input session clamps to the head or continues onto a neighbor
         assert_eq!(
             widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 74.0),
-            Some((320, 0))
+            Some((320, -1))
         );
-        // pushed past the bottom edge: lands on the last guest row
+        // pushed past the bottom edge: beyond the last guest row, unclamped
         assert_eq!(
             widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 599.9),
-            Some((320, 359))
+            Some((320, 419))
         );
         assert_eq!(
             widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 300.0),

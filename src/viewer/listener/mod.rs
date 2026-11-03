@@ -1,4 +1,7 @@
+mod head_map;
 mod remote;
+#[cfg(all(test, unix))]
+mod remote_tests;
 mod session;
 
 use std::sync::mpsc::SyncSender;

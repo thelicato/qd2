@@ -22,6 +22,8 @@ use std::os::fd::{AsFd, IntoRawFd};
 
 use super::super::{InputEvent, events::EventSender, framebuffer::FrameStreamHandler};
 
+use super::head_map::{HeadMap, clamp_to_console, compute_head_map, map_abs_position};
+
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
 
 pub(super) struct RemoteConsole {
@@ -29,10 +31,41 @@ pub(super) struct RemoteConsole {
     keyboard: KeyboardProxy<'static>,
     mouse: MouseProxy<'static>,
     listener_connection: Option<Connection>,
+    console_id: u32,
+    /// Every console of the VM (including ours), for reading head sizes.
+    siblings: Vec<(u32, ConsoleProxy<'static>)>,
+    explicit_layout: Vec<(u32, i32, i32)>,
+    head_map: std::sync::Mutex<Option<HeadMap>>,
+    /// Head map learned from the scanout itself (`ScanoutDMABUF2` backing
+    /// size + view offset), shared with the listener. Authoritative when set:
+    /// an X11 guest scans every head out of one framebuffer, so the view's
+    /// offset IS the head's position in the desktop, no guessing needed.
+    scanout_map: Arc<std::sync::Mutex<Option<HeadMap>>>,
+    /// This console's own size, for clamping single-head positions.
+    self_size: std::sync::Mutex<Option<(u32, u32)>>,
+    head_map_refreshed: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl RemoteConsole {
-    pub(super) async fn new(connection: &Connection, owner: &str, console_id: u32) -> Result<Self> {
+    pub(super) async fn new(
+        connection: &Connection,
+        owner: &str,
+        console_id: u32,
+        console_ids: &[u32],
+        explicit_layout: Vec<(u32, i32, i32)>,
+    ) -> Result<Self> {
+        let mut siblings = Vec::new();
+        for id in console_ids {
+            let path = OwnedObjectPath::try_from(format!("/org/qemu/Display1/Console_{id}"))?;
+            let sibling = ConsoleProxy::builder(connection)
+                .cache_properties(CacheProperties::No)
+                .destination(owner.to_owned())?
+                .path(path)?
+                .build()
+                .await
+                .with_context(|| format!("failed to build the proxy for console {id}"))?;
+            siblings.push((*id, sibling));
+        }
         let object_path =
             OwnedObjectPath::try_from(format!("/org/qemu/Display1/Console_{console_id}"))?;
         let proxy = ConsoleProxy::builder(connection)
@@ -61,6 +94,13 @@ impl RemoteConsole {
             keyboard,
             mouse,
             listener_connection: None,
+            console_id,
+            siblings,
+            explicit_layout,
+            head_map: std::sync::Mutex::new(None),
+            scanout_map: Arc::new(std::sync::Mutex::new(None)),
+            self_size: std::sync::Mutex::new(None),
+            head_map_refreshed: std::sync::Mutex::new(None),
         })
     }
 
@@ -84,6 +124,56 @@ impl RemoteConsole {
             .await
             .context("failed to reach the remote console")
             .map(|_| ())
+    }
+
+    /// Re-read every head's size and recompute where this console sits in
+    /// the guest desktop. Cheap (one property read per head); called at
+    /// startup, on every button press, and at most once per second while the
+    /// pointer moves, so other windows resizing their heads is picked up.
+    pub(super) async fn refresh_head_map(&self) -> Result<()> {
+        // Throttle retries even when a console query fails.
+        *self.head_map_refreshed.lock().unwrap() = Some(std::time::Instant::now());
+        let mut sizes = Vec::with_capacity(self.siblings.len());
+        for (id, proxy) in &self.siblings {
+            let width = proxy
+                .width()
+                .await
+                .with_context(|| format!("console {id} width"))?;
+            let height = proxy
+                .height()
+                .await
+                .with_context(|| format!("console {id} height"))?;
+            sizes.push((*id, width, height));
+        }
+        if let Some((_, w, h)) = sizes.iter().find(|(id, _, _)| *id == self.console_id) {
+            *self.self_size.lock().unwrap() = Some((*w, *h));
+        }
+        let map = compute_head_map(&sizes, &self.explicit_layout, self.console_id);
+        *self.head_map.lock().unwrap() = map;
+        *self.head_map_refreshed.lock().unwrap() = Some(std::time::Instant::now());
+        Ok(())
+    }
+
+    async fn refresh_head_map_if_stale(&self) {
+        let stale = self
+            .head_map_refreshed
+            .lock()
+            .unwrap()
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1));
+        if stale && !self.siblings.is_empty() {
+            let _ = self.refresh_head_map().await;
+        }
+    }
+
+    fn map_abs(&self, x: i32, y: i32) -> (u32, u32) {
+        let (x, y) = (i64::from(x), i64::from(y));
+        if let Some(map) = *self.scanout_map.lock().unwrap() {
+            return map_abs_position(&map, x, y);
+        }
+        match *self.head_map.lock().unwrap() {
+            Some(map) => map_abs_position(&map, x, y),
+            None => clamp_to_console(*self.self_size.lock().unwrap(), x, y),
+        }
     }
 
     pub(super) async fn handle_input(&self, input: InputEvent) -> Result<()> {
@@ -111,11 +201,24 @@ impl RemoteConsole {
                 .release(button)
                 .await
                 .with_context(|| format!("failed to send mouse release for {button:?}")),
-            InputEvent::MouseAbs { x, y } => self
-                .mouse
-                .set_abs_position(x, y)
-                .await
-                .with_context(|| format!("failed to move the absolute mouse to {x},{y}")),
+            InputEvent::MouseAbs {
+                x,
+                y,
+                refresh_layout,
+            } => {
+                // Refresh before positioning a click, not after its coordinates
+                // have already been mapped using an older layout.
+                if refresh_layout {
+                    let _ = self.refresh_head_map().await;
+                } else {
+                    self.refresh_head_map_if_stale().await;
+                }
+                let (mx, my) = self.map_abs(x, y);
+                self.mouse
+                    .set_abs_position(mx, my)
+                    .await
+                    .with_context(|| format!("failed to move the absolute mouse to {x},{y}"))
+            }
             InputEvent::MouseRel { dx, dy } => self
                 .mouse
                 .rel_motion(dx, dy)
@@ -150,7 +253,7 @@ impl RemoteConsole {
             let (socket0, socket1) =
                 UnixStream::pair().context("failed to allocate the listener socket pair")?;
             let listener_fd: Fd<'_> = (&socket0).into();
-            let shared = Arc::new(SharedListenerState::new(event_tx));
+            let shared = Arc::new(SharedListenerState::new(event_tx, self.scanout_map.clone()));
 
             self.proxy
                 .register_listener(listener_fd)
@@ -184,14 +287,21 @@ impl RemoteConsole {
 struct SharedListenerState {
     handler: Mutex<FrameStreamHandler>,
     disconnected: AtomicBool,
+    scanout_map: Arc<std::sync::Mutex<Option<HeadMap>>>,
 }
 
 impl SharedListenerState {
-    fn new(event_tx: EventSender) -> Self {
+    fn new(event_tx: EventSender, scanout_map: Arc<std::sync::Mutex<Option<HeadMap>>>) -> Self {
         Self {
             handler: Mutex::new(FrameStreamHandler::new(event_tx)),
             disconnected: AtomicBool::new(false),
+            scanout_map,
         }
+    }
+
+    /// Record (or clear) the head geometry the latest scanout implies.
+    fn set_scanout_map(&self, map: Option<HeadMap>) {
+        *self.scanout_map.lock().unwrap() = map;
     }
 
     fn with_handler<T>(&self, f: impl FnOnce(&mut FrameStreamHandler) -> T) -> T {
@@ -237,6 +347,7 @@ impl LocalConsoleListener {
         format: u32,
         data: serde_bytes::ByteBuf,
     ) {
+        self.shared.set_scanout_map(None);
         self.shared.with_handler(|handler| {
             handler.scanout(Scanout {
                 width,
@@ -288,6 +399,7 @@ impl LocalConsoleListener {
             .try_clone_to_owned()
             .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
 
+        self.shared.set_scanout_map(None);
         self.shared.with_handler(|handler| {
             handler.scanout_dmabuf(ScanoutDMABUF {
                 fd: [fd.into_raw_fd(), -1, -1, -1],
@@ -316,6 +428,7 @@ impl LocalConsoleListener {
     }
 
     async fn disable(&mut self) {
+        self.shared.set_scanout_map(None);
         self.shared.with_handler(|handler| handler.disable());
     }
 
@@ -386,6 +499,7 @@ impl LocalConsoleListenerMap {
             .try_clone_to_owned()
             .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
 
+        self.shared.set_scanout_map(None);
         self.shared.with_handler(|handler| {
             handler.scanout_map(ScanoutMap {
                 fd,
@@ -459,6 +573,14 @@ impl LocalConsoleListenerDmabuf2 {
             backing_width,
             backing_height,
         );
+        self.shared.set_scanout_map(HeadMap::from_scanout(
+            view.x,
+            view.y,
+            view.width,
+            view.height,
+            texture_width,
+            texture_height,
+        ));
         let mut fds = [-1; 4];
         for (index, fd) in fd.into_iter().take(4).enumerate() {
             let owned = fd

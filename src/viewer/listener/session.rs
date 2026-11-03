@@ -28,9 +28,18 @@ pub(super) async fn listener_session(
     shutdown_rx: &mut oneshot::Receiver<()>,
 ) -> Result<SessionOutcome> {
     let connection = qemu::connect(target.source_address.as_deref()).await?;
-    let mut console = RemoteConsole::new(&connection, &target.owner, target.console_id)
-        .await
-        .with_context(|| format!("failed to open console {}", target.console_id))?;
+    let mut console = RemoteConsole::new(
+        &connection,
+        &target.owner,
+        target.console_id,
+        &target.console_ids,
+        target.head_layout.clone(),
+    )
+    .await
+    .with_context(|| format!("failed to open console {}", target.console_id))?;
+    if let Err(error) = console.refresh_head_map().await {
+        eprintln!("QD2 multi-head warning: could not read the head layout: {error:#}");
+    }
 
     console
         .register_listener(event_tx.clone())

@@ -99,6 +99,13 @@ pub async fn resolve_connect_target(
         width: console.width,
         height: console.height,
         console_interfaces: console.interfaces.clone(),
+        console_ids: report
+            .consoles
+            .iter()
+            .filter(|console| console.kind == "Graphic")
+            .map(|console| console.id)
+            .collect(),
+        head_layout: Vec::new(),
         warnings: report.warnings,
     })
 }

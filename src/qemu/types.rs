@@ -38,6 +38,10 @@ pub struct ConnectTarget {
     pub width: u32,
     pub height: u32,
     pub console_interfaces: Vec<String>,
+    /// Graphical console ids of the VM (sorted), excluding text consoles.
+    pub console_ids: Vec<u32>,
+    /// Explicit guest layout `(console id, x, y)` in guest pixels; empty = auto.
+    pub head_layout: Vec<(u32, i32, i32)>,
     pub warnings: Vec<String>,
 }
 
