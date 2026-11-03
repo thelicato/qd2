@@ -255,11 +255,13 @@ pub(super) fn widget_coords_to_guest_position(
     let display_height = frame_height_f * scale;
     let x_offset = (widget_width - display_width) / 2.0;
     let y_offset = (widget_height - display_height) / 2.0;
-    let local_x = x - x_offset;
-    let local_y = y - y_offset;
-    if local_x < 0.0 || local_y < 0.0 || local_x > display_width || local_y > display_height {
-        return None;
-    }
+    // Pointer positions in the letterbox margins are clamped onto the nearest
+    // display edge rather than dropped: with a margin, the host pointer parks
+    // in the margin when pushed against the screen edge, and dropping those
+    // events left the guest cursor a few rows short of its own edge — so
+    // edge-triggered UI (auto-hide panels, hot corners) never fired.
+    let local_x = (x - x_offset).clamp(0.0, display_width);
+    let local_y = (y - y_offset).clamp(0.0, display_height);
 
     let guest_x = (local_x / scale)
         .floor()

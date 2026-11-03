@@ -1118,9 +1118,15 @@ mod tests {
             widget_coords_to_guest_position(800, 600, 640, 480, 400.0, 300.0),
             Some((320, 240))
         );
+        // in the letterbox margin: clamped onto the top edge, not dropped
         assert_eq!(
             widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 74.0),
-            None
+            Some((320, 0))
+        );
+        // pushed past the bottom edge: lands on the last guest row
+        assert_eq!(
+            widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 599.9),
+            Some((320, 359))
         );
         assert_eq!(
             widget_coords_to_guest_position(800, 600, 640, 360, 400.0, 300.0),
