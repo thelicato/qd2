@@ -34,6 +34,10 @@ const TEXT_HTML: &str = "text/html";
 const TEXT_URI_LIST: &str = "text/uri-list";
 const IMAGE_PNG: &str = "image/png";
 const CLIPBOARD_DEBUG_ENV: &str = "QD2_CLIPBOARD_DEBUG";
+/// Coalesce bursts of host clipboard changes (PRIMARY changes on every mouse
+/// move while selecting text; clipboard managers re-own CLIPBOARD right after
+/// a copy) into one read, issued after the burst settles.
+const HOST_READ_DEBOUNCE_MS: u64 = 120;
 
 const TEXT_MIME_PREFERENCE: [&str; 5] = [TEXT_PLAIN_UTF8, TEXT_PLAIN, UTF8_STRING, TEXT, STRING];
 const RICH_MIME_PREFERENCE: [&str; 3] = [TEXT_HTML, TEXT_URI_LIST, IMAGE_PNG];
@@ -104,9 +108,30 @@ impl ClipboardContent {
 
         match canonical_rich_mime(mime) {
             Some(TEXT_HTML) => self.html = Some(data),
-            Some(TEXT_URI_LIST) => self.uri_list = Some(data),
+            Some(TEXT_URI_LIST) => {
+                self.uri_list = Some(data);
+                self.add_uri_text_fallback();
+            }
             Some(IMAGE_PNG) => self.png = Some(data),
             _ => {}
+        }
+    }
+
+    fn add_uri_text_fallback(&mut self) {
+        if self.plain_text.is_some() {
+            return;
+        }
+        let Some(uris) = self.uri_list.as_deref() else {
+            return;
+        };
+        let text = String::from_utf8_lossy(uris)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            self.plain_text = Some(text);
         }
     }
 
@@ -184,10 +209,45 @@ pub(super) struct ClipboardUiState {
 #[derive(Default)]
 struct SelectionUiState {
     read_generation: u64,
+    /// A GDK read of this selection is in progress. Overlapping X11 selection
+    /// requests for the same target from one window race each other: one of
+    /// them fails, GTK falls back to a legacy text target, and an empty reply
+    /// to that crashes GTK's X11 backend (GTK issue #6850). So: one at a time.
+    read_in_flight: bool,
+    /// The selection changed while a read was in flight; read again after it.
+    read_again: bool,
+    read_debounce: Option<glib::SourceId>,
     ignored_remote_content: Option<ClipboardContent>,
     last_seen_content: Option<ClipboardContent>,
     pending_guest_content: Option<ClipboardContent>,
     awaiting_remote_echo: bool,
+}
+
+impl SelectionUiState {
+    fn request_read(&mut self) -> bool {
+        // Invalidate an old collector now, even if the next read must wait.
+        self.read_generation = self.read_generation.wrapping_add(1).max(1);
+        if self.read_in_flight {
+            self.read_again = true;
+            return false;
+        }
+        if let Some(source) = self.read_debounce.take() {
+            source.remove();
+        }
+        true
+    }
+
+    fn begin_read(&mut self) -> u64 {
+        self.read_debounce = None;
+        self.read_in_flight = true;
+        self.read_again = false;
+        self.read_generation
+    }
+
+    fn complete_read(&mut self) -> bool {
+        self.read_in_flight = false;
+        std::mem::take(&mut self.read_again)
+    }
 }
 
 impl ClipboardUiState {
@@ -213,6 +273,7 @@ struct HostClipboardRead {
     generation: u64,
     pending_parts: usize,
     content: ClipboardContent,
+    clipboard: gdk::Clipboard,
 }
 
 struct RemoteFetchPlan {
@@ -749,13 +810,72 @@ fn install_selection_bridge(
     read_host_clipboard(selection, &clipboard, &ui_state, &input_tx);
 }
 
+/// Request a read of the host selection: debounced, and never overlapping
+/// another read of the same selection (see `SelectionUiState::read_in_flight`).
 fn read_host_clipboard(
     selection: ClipboardSelection,
     clipboard: &gdk::Clipboard,
     ui_state: &Rc<RefCell<ClipboardUiState>>,
     input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
 ) {
-    let Some(generation) = next_read_generation(ui_state, selection) else {
+    {
+        let mut state = ui_state.borrow_mut();
+        let Some(selection_state) = state.selection_mut(selection) else {
+            return;
+        };
+        if !selection_state.request_read() {
+            return;
+        }
+    }
+
+    let source =
+        glib::timeout_add_local_once(std::time::Duration::from_millis(HOST_READ_DEBOUNCE_MS), {
+            let clipboard = clipboard.clone();
+            let ui_state = ui_state.clone();
+            let input_tx = input_tx.clone();
+            move || {
+                start_host_clipboard_read(selection, &clipboard, &ui_state, &input_tx);
+            }
+        });
+    if let Some(selection_state) = ui_state.borrow_mut().selection_mut(selection) {
+        selection_state.read_debounce = Some(source);
+    }
+}
+
+/// The in-flight read of `selection` finished (result used or discarded);
+/// issue the follow-up read if the selection changed meanwhile.
+fn host_read_finished(
+    selection: ClipboardSelection,
+    clipboard: &gdk::Clipboard,
+    ui_state: &Rc<RefCell<ClipboardUiState>>,
+    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+) {
+    let again = {
+        let mut state = ui_state.borrow_mut();
+        match state.selection_mut(selection) {
+            Some(selection_state) => selection_state.complete_read(),
+            None => false,
+        }
+    };
+    if again {
+        debug(format!(
+            "{selection:?} changed during the read; reading again"
+        ));
+        read_host_clipboard(selection, clipboard, ui_state, input_tx);
+    }
+}
+
+fn start_host_clipboard_read(
+    selection: ClipboardSelection,
+    clipboard: &gdk::Clipboard,
+    ui_state: &Rc<RefCell<ClipboardUiState>>,
+    input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+) {
+    let generation = ui_state
+        .borrow_mut()
+        .selection_mut(selection)
+        .map(SelectionUiState::begin_read);
+    let Some(generation) = generation else {
         return;
     };
 
@@ -770,22 +890,18 @@ fn read_host_clipboard(
         "snapshot host clipboard selection={selection:?} generation={generation} mimes={offered_mimes:?} has_string_type={has_string_type}",
     ));
 
-    let read_text = has_string_type
-        || offered_mimes.is_empty()
-        || offered_mimes
-            .iter()
-            .any(|mime| is_supported_text_mime(mime));
     let read_html = offered_mimes
         .iter()
         .any(|mime| canonical_rich_mime(mime) == Some(TEXT_HTML));
     let read_uri_list = offered_mimes
         .iter()
         .any(|mime| canonical_rich_mime(mime) == Some(TEXT_URI_LIST));
+    let text_read = host_text_read(&offered_mimes, has_string_type);
     let read_png = offered_mimes
         .iter()
         .any(|mime| canonical_rich_mime(mime) == Some(IMAGE_PNG));
 
-    let pending_parts = usize::from(read_text)
+    let pending_parts = usize::from(text_read != HostTextRead::Skip)
         + usize::from(read_html)
         + usize::from(read_uri_list)
         + usize::from(read_png);
@@ -798,6 +914,7 @@ fn read_host_clipboard(
             ui_state,
             input_tx,
         );
+        host_read_finished(selection, clipboard, ui_state, input_tx);
         return;
     }
 
@@ -806,9 +923,10 @@ fn read_host_clipboard(
         generation,
         pending_parts,
         content: ClipboardContent::default(),
+        clipboard: clipboard.clone(),
     }));
 
-    if read_text {
+    if text_read == HostTextRead::Auto {
         debug(format!("gtk read_text_async requested for {selection:?}"));
         clipboard.read_text_async(None::<&gio::Cancellable>, {
             let collector = collector.clone();
@@ -840,6 +958,17 @@ fn read_host_clipboard(
                 complete_host_read_part(&collector, part, &ui_state, &input_tx);
             }
         });
+    }
+
+    if let HostTextRead::Mime(mime) = text_read {
+        read_host_mime(
+            clipboard,
+            selection,
+            mime,
+            collector.clone(),
+            ui_state.clone(),
+            input_tx.clone(),
+        );
     }
 
     if read_html {
@@ -941,7 +1070,7 @@ fn complete_host_read_part(
     ui_state: &Rc<RefCell<ClipboardUiState>>,
     input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
 ) {
-    let (selection, generation, content, completed) = {
+    let (selection, generation, content, completed, clipboard) = {
         let mut collector = collector.borrow_mut();
         match part {
             ClipboardReadPart::Text(text) => collector.content.merge_text(text),
@@ -956,11 +1085,13 @@ fn complete_host_read_part(
             collector.generation,
             collector.content.clone(),
             collector.pending_parts == 0,
+            collector.clipboard.clone(),
         )
     };
 
     if completed {
         finish_host_snapshot(selection, generation, content, ui_state, input_tx);
+        host_read_finished(selection, &clipboard, ui_state, input_tx);
     }
 }
 
@@ -1020,19 +1151,6 @@ fn finish_host_snapshot(
         selection,
         (!content.is_empty()).then_some(content),
     ));
-}
-
-fn next_read_generation(
-    ui_state: &Rc<RefCell<ClipboardUiState>>,
-    selection: ClipboardSelection,
-) -> Option<u64> {
-    let mut ui_state = ui_state.borrow_mut();
-    let selection_state = ui_state.selection_mut(selection)?;
-    selection_state.read_generation = selection_state.read_generation.wrapping_add(1);
-    if selection_state.read_generation == 0 {
-        selection_state.read_generation = 1;
-    }
-    Some(selection_state.read_generation)
 }
 
 fn refresh_clipboard_state(
@@ -1104,6 +1222,45 @@ fn preferred_text_request_mimes(mimes: &[String]) -> Vec<&'static str> {
         .collect()
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum HostTextRead {
+    Skip,
+    Auto,
+    Mime(&'static str),
+}
+
+fn host_text_read(mimes: &[String], has_string_type: bool) -> HostTextRead {
+    let file_copy = mimes
+        .iter()
+        .any(|mime| canonical_rich_mime(mime) == Some(TEXT_URI_LIST) || is_file_copy_mime(mime));
+    if file_copy {
+        // Avoid GTK's legacy TEXT/STRING fallback for file-manager selections.
+        // Read only an explicitly offered UTF-8 target; URI lists supply a
+        // plain-text fallback when no such target is available.
+        return [TEXT_PLAIN_UTF8, TEXT_PLAIN, UTF8_STRING]
+            .into_iter()
+            .find(|candidate| mimes.iter().any(|mime| mime == candidate))
+            .map(HostTextRead::Mime)
+            .unwrap_or(HostTextRead::Skip);
+    }
+    if has_string_type || mimes.is_empty() || mimes.iter().any(|mime| is_supported_text_mime(mime))
+    {
+        HostTextRead::Auto
+    } else {
+        HostTextRead::Skip
+    }
+}
+
+/// Mime types file managers put on the clipboard alongside a file copy.
+fn is_file_copy_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "x-special/gnome-copied-files"
+            | "application/x-kde-cutselection"
+            | "x-special/nautilus-clipboard"
+    )
+}
+
 fn is_supported_text_mime(mime: &str) -> bool {
     TEXT_MIME_PREFERENCE.contains(&mime)
 }
@@ -1165,10 +1322,180 @@ enum ClipboardReadPart {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardContent, ClipboardSelection, IMAGE_PNG, STRING, TEXT, TEXT_HTML, TEXT_PLAIN,
-        TEXT_PLAIN_UTF8, TEXT_URI_LIST, UTF8_STRING, canonical_rich_mime,
-        preferred_text_request_mimes, remote_fetch_plan, should_accept_remote_grab,
+        ClipboardContent, ClipboardSelection, ClipboardUiState, HostTextRead, IMAGE_PNG, STRING,
+        SelectionUiState, TEXT, TEXT_HTML, TEXT_PLAIN, TEXT_PLAIN_UTF8, TEXT_URI_LIST, UTF8_STRING,
+        canonical_rich_mime, finish_host_snapshot, host_text_read, preferred_text_request_mimes,
+        remote_fetch_plan, should_accept_remote_grab,
     };
+    use std::{cell::RefCell, rc::Rc};
+    use tokio::sync::mpsc as tokio_mpsc;
+
+    #[test]
+    fn changes_during_a_read_discard_old_content_and_coalesce_a_follow_up() {
+        let state = Rc::new(RefCell::new(ClipboardUiState::default()));
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        assert!(state.borrow_mut().clipboard.request_read());
+        let old_generation = state.borrow_mut().clipboard.begin_read();
+        // A clipboard manager re-owns the selection twice while reading it.
+        assert!(!state.borrow_mut().clipboard.request_read());
+        assert!(!state.borrow_mut().clipboard.request_read());
+        let mut old = ClipboardContent::default();
+        old.merge_text("old".into());
+        finish_host_snapshot(
+            ClipboardSelection::Clipboard,
+            old_generation,
+            old,
+            &state,
+            &tx,
+        );
+        assert!(rx.try_recv().is_err(), "stale contents reached the guest");
+        assert!(state.borrow_mut().clipboard.complete_read());
+
+        assert!(state.borrow_mut().clipboard.request_read());
+        let generation = state.borrow_mut().clipboard.begin_read();
+        let mut latest = ClipboardContent::default();
+        latest.merge_text("latest".into());
+        finish_host_snapshot(
+            ClipboardSelection::Clipboard,
+            generation,
+            latest.clone(),
+            &state,
+            &tx,
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            super::InputEvent::ClipboardHostChanged(ClipboardSelection::Clipboard, Some(latest),)
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!state.borrow_mut().clipboard.complete_read());
+    }
+
+    #[test]
+    fn selection_reads_are_independent_and_can_restart_after_empty_or_failed_reads() {
+        let mut state = ClipboardUiState::default();
+        assert!(state.clipboard.request_read());
+        state.clipboard.begin_read();
+        assert!(state.primary.request_read());
+        state.primary.begin_read();
+        assert!(!state.clipboard.request_read());
+        assert!(!state.primary.complete_read());
+        assert!(state.primary.request_read());
+        assert!(state.clipboard.complete_read());
+        assert!(state.clipboard.request_read());
+        state.clipboard.begin_read();
+        assert!(!state.clipboard.complete_read());
+    }
+
+    #[test]
+    fn pending_changes_and_generation_wrap_keep_old_snapshots_invalid() {
+        let mut state = SelectionUiState {
+            read_generation: u64::MAX,
+            ..Default::default()
+        };
+        assert!(state.request_read());
+        assert_eq!(state.read_generation, 1);
+        assert!(state.request_read());
+        assert!(state.request_read());
+        assert_eq!(state.begin_read(), 3);
+        assert!(!state.complete_read());
+    }
+
+    #[test]
+    fn file_copies_use_only_explicit_utf8_text_targets() {
+        let offered = |mimes: &[&str]| {
+            mimes
+                .iter()
+                .map(|mime| mime.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            host_text_read(&offered(&[TEXT_URI_LIST, TEXT, STRING]), true),
+            HostTextRead::Skip
+        );
+        assert_eq!(
+            host_text_read(&offered(&[TEXT_URI_LIST, TEXT_PLAIN]), true),
+            HostTextRead::Mime(TEXT_PLAIN)
+        );
+        assert_eq!(
+            host_text_read(
+                &offered(&["x-special/gnome-copied-files", UTF8_STRING]),
+                true
+            ),
+            HostTextRead::Mime(UTF8_STRING)
+        );
+        assert_eq!(
+            host_text_read(
+                &offered(&[TEXT_PLAIN, TEXT_PLAIN_UTF8, TEXT_URI_LIST]),
+                false
+            ),
+            HostTextRead::Mime(TEXT_PLAIN_UTF8)
+        );
+        assert_eq!(
+            host_text_read(&offered(&[TEXT_PLAIN]), true),
+            HostTextRead::Auto
+        );
+        assert_eq!(
+            host_text_read(&offered(&[IMAGE_PNG]), false),
+            HostTextRead::Skip
+        );
+    }
+
+    #[test]
+    fn uri_lists_remain_pasteable_as_text_without_losing_rich_content() {
+        let uris = b"# copied files\r\nfile:///tmp/one%20file\r\n\r\nfile:///tmp/two\r\n";
+        let mut content = ClipboardContent::default();
+        content.merge_mime_bytes(TEXT_URI_LIST, uris.to_vec());
+        assert_eq!(
+            content.reply_for_requested_mimes(&[TEXT_PLAIN.into()]),
+            Some((
+                TEXT_PLAIN.into(),
+                b"file:///tmp/one%20file\nfile:///tmp/two".to_vec(),
+            ))
+        );
+        assert_eq!(
+            content.reply_for_requested_mimes(&[TEXT_URI_LIST.into()]),
+            Some((TEXT_URI_LIST.into(), uris.to_vec(),))
+        );
+    }
+
+    #[test]
+    fn explicit_text_wins_regardless_of_uri_read_completion_order() {
+        for text_first in [true, false] {
+            let mut content = ClipboardContent::default();
+            if text_first {
+                content.merge_text("/tmp/file name".into());
+            }
+            content.merge_mime_bytes(TEXT_URI_LIST, b"file:///tmp/file%20name\r\n".to_vec());
+            if !text_first {
+                content.merge_mime_bytes(TEXT_PLAIN_UTF8, b"/tmp/file name".to_vec());
+            }
+            assert_eq!(content.plain_text.as_deref(), Some("/tmp/file name"));
+        }
+    }
+
+    #[test]
+    fn uri_fallback_does_not_turn_a_remote_clipboard_echo_into_a_host_change() {
+        let mut content = ClipboardContent::default();
+        content.merge_mime_bytes(TEXT_URI_LIST, b"file:///tmp/file\r\n".to_vec());
+        let state = Rc::new(RefCell::new(ClipboardUiState::default()));
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        {
+            let mut state = state.borrow_mut();
+            state.clipboard.ignored_remote_content = Some(content.clone());
+            state.clipboard.awaiting_remote_echo = true;
+            state.clipboard.request_read();
+        }
+        let generation = state.borrow_mut().clipboard.begin_read();
+        finish_host_snapshot(
+            ClipboardSelection::Clipboard,
+            generation,
+            content,
+            &state,
+            &tx,
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!state.borrow().clipboard.awaiting_remote_echo);
+    }
 
     #[test]
     fn advertised_mimes_include_text_aliases_and_rich_content() {
