@@ -36,10 +36,23 @@ pub(super) async fn listener_session(
         .register_listener(event_tx.clone())
         .await
         .context("failed to register the QEMU display listener")?;
+    // QEMU accepts a single clipboard peer per VM. A second viewer (another
+    // console of a multi-head guest, or a second window) must still work —
+    // just without clipboard sync — so a failed registration is a warning,
+    // not a fatal startup error.
     let clipboard =
-        clipboard::register_clipboard_bridge(&connection, &target.owner, event_tx.clone())
+        match clipboard::register_clipboard_bridge(&connection, &target.owner, event_tx.clone())
             .await
-            .context("failed to initialize clipboard sharing")?;
+        {
+            Ok(clipboard) => clipboard,
+            Err(error) => {
+                eprintln!("QD2 clipboard warning: clipboard sharing disabled: {error:#}");
+                let _ = event_tx.send(ViewerEvent::Status(format!(
+                    "Clipboard sharing unavailable in this window: {error:#}"
+                )));
+                None
+            }
+        };
     let _audio =
         match audio::register_audio_output(&connection, &target.owner, &target.vm_name).await {
             Ok(audio) => audio,
