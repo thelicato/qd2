@@ -62,6 +62,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Optional undecorated launch mode for tiling compositor workflows.
 - Top-bar actions for taking screenshots and sending guest shortcuts like `Ctrl+Alt+Delete`.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.
+- Press and release bare `Ctrl+Alt` to release the input grab. Guest shortcuts such as `Ctrl+Alt+Arrow` keep the grab; custom release bindings such as `release-cursor=ctrl+q` fire on key press.
 - A VM chooser for the multi-VM `connect` flow.
 
 ## 🧱 Install Requirements

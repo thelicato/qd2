@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
-use gtk::{glib, prelude::*};
+use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -91,6 +91,7 @@ pub(super) fn install_keyboard_controller(
     release_grab: impl Fn() + 'static,
 ) -> KeyboardControllerHandle {
     let state = Rc::new(RefCell::new(PressedKeyState::default()));
+    let release_grab = Rc::new(release_grab);
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -98,46 +99,42 @@ pub(super) fn install_keyboard_controller(
         let input_tx = input_tx.clone();
         let input_grab = input_grab.clone();
         let release_hotkey = release_hotkey.clone();
+        let release_grab = release_grab.clone();
         let state = state.clone();
         move |_, keyval, keycode, modifiers| {
-            let Some(qnum) = gdk_keycode_to_qnum(keycode) else {
-                return glib::Propagation::Proceed;
-            };
-
             if !grab::is_active(&input_grab) {
                 return glib::Propagation::Proceed;
             }
 
-            if release_hotkey.matches(keyval, modifiers) {
-                let mut state = state.borrow_mut();
-                state.release_all(&input_tx);
-                state.suppress_next_release(qnum);
-                release_grab();
-                return glib::Propagation::Stop;
-            }
+            let Some(qnum) = gdk_keycode_to_qnum(keycode) else {
+                state.borrow_mut().cancel_release_chord();
+                return glib::Propagation::Proceed;
+            };
 
-            let mut state = state.borrow_mut();
-            if state.press(qnum) {
-                let _ = input_tx.send(InputEvent::KeyPress(qnum));
+            let release = state.borrow_mut().handle_press(
+                qnum,
+                keyval,
+                modifiers,
+                &release_hotkey,
+                &input_tx,
+            );
+            if release {
+                release_grab();
             }
             glib::Propagation::Stop
         }
     });
     key_controller.connect_key_released({
         let input_tx = input_tx.clone();
+        let release_grab = release_grab.clone();
         let state = state.clone();
         move |_, _, keycode, _| {
             let Some(qnum) = gdk_keycode_to_qnum(keycode) else {
                 return;
             };
-
-            let mut state = state.borrow_mut();
-            if state.take_suppressed_release(qnum) {
-                return;
-            }
-
-            if state.release(qnum) {
-                let _ = input_tx.send(InputEvent::KeyRelease(qnum));
+            let release = state.borrow_mut().handle_release(qnum, &input_tx);
+            if release {
+                release_grab();
             }
         }
     });
@@ -161,12 +158,83 @@ pub(super) fn send_guest_shortcut(
 
 #[derive(Default)]
 struct PressedKeyState {
+    // Track physical press/release events. Host modifier masks do not reliably
+    // identify held AltGr or keys remapped to different logical modifiers.
     pressed: HashSet<u32>,
     suppressed_releases: HashSet<u32>,
+    chord_keys: HashSet<u32>,
+    release_chord_armed: bool,
+    release_chord_used: bool,
 }
 
 impl PressedKeyState {
+    /// Return whether the viewer grab should be released, after dropping the state borrow.
+    fn handle_press(
+        &mut self,
+        qnum: u32,
+        keyval: gdk::Key,
+        modifiers: gdk::ModifierType,
+        hotkey: &Hotkey,
+        input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+    ) -> bool {
+        // Repeats must not re-arm a chord canceled by a guest shortcut.
+        if self.pressed.contains(&qnum) {
+            return false;
+        }
+        if !hotkey.is_modifier_chord() && hotkey.matches(keyval, modifiers) {
+            self.release_all(input_tx);
+            self.suppress_next_release(qnum);
+            return true;
+        }
+
+        if hotkey.chord_member(keyval) {
+            self.chord_keys.insert(qnum);
+        } else if !self.chord_keys.is_empty() {
+            self.cancel_release_chord();
+        }
+        if hotkey.is_modifier_chord() && hotkey.matches(keyval, modifiers) {
+            // A bare chord releases on key-up; Ctrl+Alt+<key> belongs to the guest.
+            self.release_chord_armed = !self.release_chord_used
+                && self.pressed.iter().all(|key| self.chord_keys.contains(key));
+        }
+        if self.press(qnum) {
+            let _ = input_tx.send(InputEvent::KeyPress(qnum));
+        }
+        false
+    }
+
+    fn cancel_release_chord(&mut self) {
+        self.release_chord_armed = false;
+        if !self.chord_keys.is_empty() {
+            self.release_chord_used = true;
+        }
+    }
+
+    fn handle_release(
+        &mut self,
+        qnum: u32,
+        input_tx: &tokio_mpsc::UnboundedSender<InputEvent>,
+    ) -> bool {
+        // Use the recorded physical key even if its keysym changed since press.
+        let chord_member = self.chord_keys.remove(&qnum);
+        if self.release_chord_armed && chord_member && self.pressed.contains(&qnum) {
+            self.release_all(input_tx);
+            self.take_suppressed_release(qnum);
+            return true;
+        }
+        if !self.take_suppressed_release(qnum) && self.release(qnum) {
+            let _ = input_tx.send(InputEvent::KeyRelease(qnum));
+        }
+        if self.chord_keys.is_empty() {
+            self.release_chord_armed = false;
+            self.release_chord_used = false;
+        }
+        false
+    }
+
     fn press(&mut self, qnum: u32) -> bool {
+        // A previous physical release may have gone to the host after focus loss.
+        self.suppressed_releases.remove(&qnum);
         self.pressed.insert(qnum)
     }
 
@@ -183,6 +251,9 @@ impl PressedKeyState {
     }
 
     fn release_all(&mut self, input_tx: &tokio_mpsc::UnboundedSender<InputEvent>) {
+        self.chord_keys.clear();
+        self.release_chord_armed = false;
+        self.release_chord_used = false;
         for qnum in self.pressed.drain() {
             let _ = input_tx.send(InputEvent::KeyRelease(qnum));
             self.suppressed_releases.insert(qnum);
@@ -408,6 +479,202 @@ mod tests {
         assert!(state.take_suppressed_release(29));
         assert!(state.take_suppressed_release(56));
         assert!(!state.take_suppressed_release(29));
+    }
+
+    #[test]
+    fn bare_release_chord_fires_on_release_in_either_modifier_order() {
+        for [(first, first_key, first_mask), (second, second_key, _)] in [
+            [
+                (29, gdk::Key::Control_L, gdk::ModifierType::CONTROL_MASK),
+                (56, gdk::Key::Alt_L, gdk::ModifierType::ALT_MASK),
+            ],
+            [
+                (56, gdk::Key::Alt_L, gdk::ModifierType::ALT_MASK),
+                (29, gdk::Key::Control_L, gdk::ModifierType::CONTROL_MASK),
+            ],
+        ] {
+            let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+            let mut state = PressedKeyState::default();
+            let hotkeys = ViewerHotkeys::default();
+            let hotkey = hotkeys.release_cursor();
+            assert!(!state.handle_press(first, first_key, gdk::ModifierType::empty(), hotkey, &tx));
+            assert!(!state.handle_press(second, second_key, first_mask, hotkey, &tx));
+            assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(first));
+            assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(second));
+            assert!(rx.try_recv().is_err());
+
+            assert!(state.handle_release(second, &tx));
+            let mut releases = vec![rx.try_recv().unwrap(), rx.try_recv().unwrap()];
+            releases.sort_by_key(|event| match event {
+                super::InputEvent::KeyRelease(key) => *key,
+                _ => 0,
+            });
+            assert_eq!(
+                releases,
+                vec![
+                    super::InputEvent::KeyRelease(29),
+                    super::InputEvent::KeyRelease(56)
+                ]
+            );
+            assert!(!state.handle_release(first, &tx));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn guest_shortcut_and_modifier_repeats_do_not_release_the_grab() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let mut state = PressedKeyState::default();
+        let hotkeys = ViewerHotkeys::default();
+        let hotkey = hotkeys.release_cursor();
+        let ctrl_alt = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        for (qnum, key, mask) in [
+            (29, gdk::Key::Control_L, gdk::ModifierType::empty()),
+            (56, gdk::Key::Alt_L, gdk::ModifierType::CONTROL_MASK),
+            (203, gdk::Key::Left, ctrl_alt),
+            (56, gdk::Key::Alt_L, ctrl_alt),
+        ] {
+            assert!(!state.handle_press(qnum, key, mask, hotkey, &tx));
+        }
+        for qnum in [203, 56, 29] {
+            assert!(!state.handle_release(qnum, &tx));
+        }
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            events,
+            vec![
+                super::InputEvent::KeyPress(29),
+                super::InputEvent::KeyPress(56),
+                super::InputEvent::KeyPress(203),
+                super::InputEvent::KeyRelease(203),
+                super::InputEvent::KeyRelease(56),
+                super::InputEvent::KeyRelease(29),
+            ]
+        );
+        // A fresh bare chord still works after the shortcut finishes.
+        assert!(!state.handle_press(
+            29,
+            gdk::Key::Control_L,
+            gdk::ModifierType::empty(),
+            hotkey,
+            &tx
+        ));
+        assert!(!state.handle_press(
+            56,
+            gdk::Key::Alt_L,
+            gdk::ModifierType::CONTROL_MASK,
+            hotkey,
+            &tx
+        ));
+        assert!(state.handle_release(29, &tx));
+    }
+
+    #[test]
+    fn altgr_and_remapped_keys_follow_physical_press_release_events() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let mut state = PressedKeyState::default();
+        let hotkeys = ViewerHotkeys::default();
+        let hotkey = hotkeys.release_cursor();
+        for (qnum, key) in [(184, gdk::Key::ISO_Level3_Shift), (58, gdk::Key::Control_L)] {
+            assert!(!state.handle_press(qnum, key, gdk::ModifierType::empty(), hotkey, &tx));
+        }
+        // The next event's modifier mask need not contain ALT for held AltGr.
+        assert!(!state.handle_press(
+            16,
+            gdk::Key::at,
+            gdk::ModifierType::CONTROL_MASK,
+            hotkey,
+            &tx
+        ));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(184));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(58));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(16));
+        assert!(rx.try_recv().is_err());
+        for qnum in [16, 58, 184] {
+            assert!(!state.handle_release(qnum, &tx));
+            assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyRelease(qnum));
+        }
+    }
+
+    #[test]
+    fn key_binding_still_releases_on_press_and_consumes_its_release() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let mut state = PressedKeyState::default();
+        let hotkeys = ViewerHotkeys::parse(Some("release-cursor=ctrl+q")).unwrap();
+        let hotkey = hotkeys.release_cursor();
+        assert!(!state.handle_press(
+            29,
+            gdk::Key::Control_L,
+            gdk::ModifierType::empty(),
+            hotkey,
+            &tx
+        ));
+        assert!(state.handle_press(
+            16,
+            gdk::Key::q,
+            gdk::ModifierType::CONTROL_MASK,
+            hotkey,
+            &tx
+        ));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(29));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyRelease(29));
+        assert!(!state.handle_release(16, &tx));
+        assert!(!state.handle_release(29, &tx));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn focus_loss_clears_chord_and_does_not_swallow_the_next_key_release() {
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let mut state = PressedKeyState::default();
+        let hotkeys = ViewerHotkeys::default();
+        let hotkey = hotkeys.release_cursor();
+        state.handle_press(
+            29,
+            gdk::Key::Control_L,
+            gdk::ModifierType::empty(),
+            hotkey,
+            &tx,
+        );
+        state.handle_press(
+            56,
+            gdk::Key::Alt_L,
+            gdk::ModifierType::CONTROL_MASK,
+            hotkey,
+            &tx,
+        );
+        state.release_all(&tx);
+        while rx.try_recv().is_ok() {}
+        // Physical releases happened on the host while the viewer lacked focus.
+        assert!(!state.handle_press(
+            29,
+            gdk::Key::Control_L,
+            gdk::ModifierType::empty(),
+            hotkey,
+            &tx
+        ));
+        assert!(!state.handle_release(29, &tx));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyPress(29));
+        assert_eq!(rx.try_recv().unwrap(), super::InputEvent::KeyRelease(29));
+        assert!(!state.handle_release(56, &tx));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_key_held_before_the_chord_prevents_a_bare_chord_release() {
+        let (tx, _rx) = tokio_mpsc::unbounded_channel();
+        let mut state = PressedKeyState::default();
+        let hotkeys = ViewerHotkeys::default();
+        let hotkey = hotkeys.release_cursor();
+        for (qnum, key, mask) in [
+            (30, gdk::Key::a, gdk::ModifierType::empty()),
+            (29, gdk::Key::Control_L, gdk::ModifierType::empty()),
+            (56, gdk::Key::Alt_L, gdk::ModifierType::CONTROL_MASK),
+        ] {
+            assert!(!state.handle_press(qnum, key, mask, hotkey, &tx));
+        }
+        assert!(!state.handle_release(56, &tx));
+        assert!(!state.handle_release(29, &tx));
     }
 
     #[test]

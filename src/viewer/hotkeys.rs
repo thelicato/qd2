@@ -208,6 +208,25 @@ impl Hotkey {
         }
     }
 
+    /// Whether the binding is a modifier-only chord (like the default
+    /// `Ctrl+Alt`). Those must not fire on press: half of every
+    /// `Ctrl+Alt+<key>` guest shortcut would trigger them. The keyboard
+    /// controller arms them on press and fires on a clean release instead.
+    pub(super) fn is_modifier_chord(&self) -> bool {
+        matches!(self, Self::Modifiers { .. })
+    }
+
+    /// Whether this key is one of the modifiers making up a modifier-only
+    /// binding (used for release-time chord detection).
+    pub(super) fn chord_member(&self, keyval: gdk::Key) -> bool {
+        match self {
+            Self::Modifiers { modifiers, .. } => {
+                modifier_mask_for_key(keyval).is_some_and(|mask| modifiers.contains(mask))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn accelerator(&self) -> Option<&str> {
         match self {
             Self::Disabled => None,
