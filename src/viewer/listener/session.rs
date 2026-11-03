@@ -49,19 +49,23 @@ pub(super) async fn listener_session(
     // console of a multi-head guest, or a second window) must still work —
     // just without clipboard sync — so a failed registration is a warning,
     // not a fatal startup error.
-    let clipboard =
-        match clipboard::register_clipboard_bridge(&connection, &target.owner, event_tx.clone())
-            .await
-        {
-            Ok(clipboard) => clipboard,
-            Err(error) => {
-                eprintln!("QD2 clipboard warning: clipboard sharing disabled: {error:#}");
-                let _ = event_tx.send(ViewerEvent::Status(format!(
-                    "Clipboard sharing unavailable in this window: {error:#}"
-                )));
-                None
-            }
-        };
+    let clipboard = match clipboard::register_clipboard_bridge(
+        &connection,
+        &target.owner,
+        event_tx.clone(),
+        target.share_clipboard,
+    )
+    .await
+    {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            eprintln!("QD2 clipboard warning: clipboard sharing disabled: {error:#}");
+            let _ = event_tx.send(ViewerEvent::Status(format!(
+                "Clipboard sharing unavailable in this window: {error:#}"
+            )));
+            None
+        }
+    };
     let _audio =
         match audio::register_audio_output(&connection, &target.owner, &target.vm_name).await {
             Ok(audio) => audio,

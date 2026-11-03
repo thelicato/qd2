@@ -413,12 +413,17 @@ pub(super) async fn register_clipboard_bridge(
     connection: &Connection,
     owner: &str,
     event_tx: EventSender,
+    enabled: bool,
 ) -> anyhow::Result<Option<ClipboardSession>> {
+    if !enabled {
+        debug("clipboard sharing disabled (--no-clipboard)");
+        return Ok(None);
+    }
     debug(format!("register clipboard bridge for owner={owner}"));
     let display = Display::new(connection, Some(owner.to_owned()))
         .await
         .context("failed to open the QEMU display object for clipboard sharing")?;
-    let Some(clipboard) = display
+    let Some(mut clipboard) = display
         .clipboard()
         .await
         .context("failed to inspect the QEMU clipboard interface")?
@@ -426,6 +431,18 @@ pub(super) async fn register_clipboard_bridge(
         debug("qemu display has no clipboard object");
         return Ok(None);
     };
+
+    // qemu-display 0.2.1 discovers objects using the selected owner, but its
+    // clipboard constructor defaults back to org.qemu. Pin every clipboard
+    // call to the VM being viewed, including subsequent Grab/Request calls.
+    clipboard.proxy = qemu_display::ClipboardProxy::builder(connection)
+        .destination(owner.to_owned())
+        .context("invalid QEMU display owner for the clipboard proxy")?
+        .path("/org/qemu/Display1/Clipboard")
+        .context("invalid clipboard object path")?
+        .build()
+        .await
+        .context("failed to build the QEMU clipboard proxy")?;
 
     let shared = Arc::new(Mutex::new(ClipboardBridgeState::default()));
     clipboard
@@ -1318,6 +1335,9 @@ enum ClipboardReadPart {
     Bytes { mime: String, data: Vec<u8> },
     Empty,
 }
+
+#[cfg(all(test, unix))]
+mod dbus_tests;
 
 #[cfg(test)]
 mod tests {

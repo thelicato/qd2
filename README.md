@@ -47,6 +47,7 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--no-fullscreen-bar` | Hide the floating fullscreen toolbar and its hover hotspot. | `qd2 connect --fullscreen --no-fullscreen-bar` |
 | `--dpu` | Use QEMU-provided DMABUF damage rectangles instead of the default full-surface DMABUF refresh path. | `qd2 connect --dpu` |
 | `--no-offload` | Disable compositor graphics offload and use the normal GTK rendering path. | `qd2 connect --no-offload` |
+| `--no-clipboard` | Disable clipboard sharing in both directions. | `qd2 connect --no-clipboard` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
 ## 🖥️ Viewer Highlights
@@ -75,6 +76,8 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 Open one viewer per graphical console, for example `qd2 connect --vm demo -c 0` and `qd2 connect --vm demo -c 1`. Absolute pointer motion follows the hovering pointer between windows, and drags can continue onto a neighboring head. Single-head input is clamped to the display edges; relative mouse input still requires a grab.
 
 Shared-framebuffer scanouts supply the layout automatically. Otherwise, QD2 assumes active heads are arranged left-to-right in console-ID order. Pass the same `--head-layout` value to every viewer if the guest uses another arrangement, including heads left of or above the origin. This describes the guest layout; configure the guest to match, using a common guest display scale for the console-size fallback. Only the first viewer can register clipboard sharing; additional viewers continue without it.
+
+Use `--no-clipboard` to disable sharing in both directions, for example when another application already synchronizes the clipboard. When multiple VMs use the same D-Bus session bus, clipboard operations target the selected VM.
 
 ## 🧱 Install Requirements
 

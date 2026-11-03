@@ -42,6 +42,7 @@ pub struct ConnectTarget {
     pub console_ids: Vec<u32>,
     /// Explicit guest layout `(console id, x, y)` in guest pixels; empty = auto.
     pub head_layout: Vec<(u32, i32, i32)>,
+    pub share_clipboard: bool,
     pub warnings: Vec<String>,
 }
 

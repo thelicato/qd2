@@ -106,6 +106,7 @@ pub async fn resolve_connect_target(
             .map(|console| console.id)
             .collect(),
         head_layout: Vec::new(),
+        share_clipboard: true,
         warnings: report.warnings,
     })
 }

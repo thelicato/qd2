@@ -66,6 +66,7 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
     let mut target = target;
     cli::validate_head_layout(&head_layout, &target.console_ids)?;
     target.head_layout = head_layout;
+    target.share_clipboard = !args.no_clipboard;
     viewer::connect(
         target,
         args.address(),

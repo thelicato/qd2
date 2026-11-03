@@ -110,6 +110,10 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub no_offload: bool,
 
+    /// Disable clipboard sharing in both directions.
+    #[arg(long)]
+    pub no_clipboard: bool,
+
     /// With `--fullscreen`: which monitor to fill, by connector name
     /// (`DP-1`, `HDMI-A-1`), model name, or 0-based index in the display's
     /// monitor list. Without it the window manager picks the monitor the
