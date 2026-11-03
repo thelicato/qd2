@@ -41,7 +41,9 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 | `--address <DBUS_ADDRESS>` | Target a specific private D-Bus socket instead of auto-discovery. | `qd2 inspect --address "unix:path=<path_to_sock>"` |
 | `--verbose` | Print extra discovery and viewer diagnostics. | `qd2 --verbose doctor` |
 | `--fullscreen` | Start the GTK4 viewer directly in fullscreen mode for `connect`. | `qd2 connect --fullscreen` |
+| `--monitor <CONNECTOR\|MODEL\|INDEX>` | Choose the monitor for initial fullscreen by connector, model, or zero-based index. | `qd2 connect --fullscreen --monitor DP-1` |
 | `--undecorated` | Open the GTK4 viewer without normal window decorations for `connect`. | `qd2 connect --undecorated` |
+| `--no-fullscreen-bar` | Hide the floating fullscreen toolbar and its hover hotspot. | `qd2 connect --fullscreen --no-fullscreen-bar` |
 | `--dpu` | Use QEMU-provided DMABUF damage rectangles instead of the default full-surface DMABUF refresh path. | `qd2 connect --dpu` |
 | `--hotkeys ...` | Override viewer shortcuts in a virt-viewer-style format for `connect`. | `qd2 connect --hotkeys "toggle-fullscreen=ctrl+enter,release-cursor=ctrl+alt"` |
 
@@ -55,6 +57,8 @@ QD2 is built for people who want the flexibility of QEMU's D-Bus display stack w
 - Guest audio playback through the QEMU D-Bus audio interface.
 - Floating fullscreen controls inspired by virt-viewer.
 - Direct fullscreen launch with `qd2 connect --fullscreen`.
+- Guest resize requests follow the viewer's display area, including fullscreen and fractional host scaling. The guest must support QEMU display resize hints; otherwise its existing resolution remains scaled to fit.
+- Optional fullscreen toolbar hiding with `--no-fullscreen-bar`. Press `F11` to leave fullscreen, or use your configured `toggle-fullscreen` hotkey.
 - Optional undecorated launch mode for tiling compositor workflows.
 - Top-bar actions for taking screenshots and sending guest shortcuts like `Ctrl+Alt+Delete`.
 - Configurable hotkeys for fullscreen, grab release, and DMABUF transforms.

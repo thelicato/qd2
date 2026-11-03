@@ -71,6 +71,13 @@ impl RemoteConsole {
             .context("failed to query the mouse mode")
     }
 
+    pub(super) async fn set_ui_info(&self, width: u32, height: u32) -> Result<()> {
+        self.proxy
+            .set_ui_info(0, 0, 0, 0, width, height)
+            .await
+            .with_context(|| format!("failed to request a guest resize to {width}x{height}"))
+    }
+
     pub(super) async fn check_alive(&self) -> Result<()> {
         self.proxy
             .label()
@@ -91,9 +98,9 @@ impl RemoteConsole {
                 .release(keycode)
                 .await
                 .with_context(|| format!("failed to send key release for qnum {keycode}")),
-            InputEvent::ClipboardViewerFocused(_) | InputEvent::ClipboardHostChanged(_, _) => {
-                Ok(())
-            }
+            InputEvent::ClipboardViewerFocused(_)
+            | InputEvent::ClipboardHostChanged(_, _)
+            | InputEvent::UiInfo { .. } => Ok(()),
             InputEvent::MousePress(button) => self
                 .mouse
                 .press(button)

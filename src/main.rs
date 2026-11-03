@@ -69,6 +69,7 @@ async fn run_connect_command(args: ConnectArgs) -> Result<()> {
         args.fullscreen,
         args.monitor.as_deref(),
         args.undecorated,
+        args.no_fullscreen_bar,
         args.dmabuf_partial_updates,
     )
 }

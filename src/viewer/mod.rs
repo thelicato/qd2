@@ -11,6 +11,7 @@ mod hotkeys;
 mod keyboard;
 mod listener;
 mod mouse;
+mod resize;
 mod utils;
 
 use std::{
@@ -126,6 +127,7 @@ pub fn connect(
     start_fullscreen: bool,
     fullscreen_monitor: Option<&str>,
     undecorated: bool,
+    no_fullscreen_bar: bool,
     dmabuf_partial_updates: bool,
 ) -> Result<()> {
     let hotkeys = hotkeys::ViewerHotkeys::parse(hotkeys_spec)
@@ -158,6 +160,7 @@ pub fn connect(
         start_fullscreen,
         fullscreen_monitor,
         undecorated,
+        no_fullscreen_bar,
         dmabuf_partial_updates,
     );
 
@@ -179,6 +182,7 @@ fn run_window(
     start_fullscreen: bool,
     fullscreen_monitor: Option<&str>,
     undecorated: bool,
+    no_fullscreen_bar: bool,
     dmabuf_partial_updates: bool,
 ) -> Result<()> {
     gtk::init().context("failed to initialize GTK4")?;
@@ -197,17 +201,16 @@ fn run_window(
 
     let status_label = gtk::Label::new(Some("Waiting for framebuffer..."));
     status_label.set_wrap(true);
-    status_label.set_selectable(true);
+    status_label.set_can_target(false);
+    status_label.set_halign(gtk::Align::Center);
+    status_label.set_valign(gtk::Align::Start);
+    status_label.add_css_class("osd");
     status_label.set_margin_top(12);
     status_label.set_margin_bottom(12);
     status_label.set_margin_start(12);
     status_label.set_margin_end(12);
 
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    container.append(&status_label);
-    container.append(&picture);
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&container));
+    let overlay = display_overlay(&picture, &status_label);
 
     let window = gtk::Window::builder()
         .title(&ready.title)
@@ -293,9 +296,13 @@ fn run_window(
         .build();
     fullscreen_revealer.set_child(Some(&floating_controls.container));
     fullscreen_revealer.set_visible(false);
-    overlay.add_overlay(&fullscreen_revealer);
-    overlay.set_measure_overlay(&fullscreen_revealer, false);
-    overlay.set_clip_overlay(&fullscreen_revealer, false);
+    // --no-fullscreen-bar: leave the floating bar and its hotspot unparented so
+    // fullscreen has no screen-edge chrome at all.
+    if !no_fullscreen_bar {
+        overlay.add_overlay(&fullscreen_revealer);
+        overlay.set_measure_overlay(&fullscreen_revealer, false);
+        overlay.set_clip_overlay(&fullscreen_revealer, false);
+    }
 
     let fullscreen_hotspot = gtk::Box::builder()
         .halign(gtk::Align::Center)
@@ -305,9 +312,11 @@ fn run_window(
         .build();
     fullscreen_hotspot.set_opacity(0.0);
     fullscreen_hotspot.set_visible(false);
-    overlay.add_overlay(&fullscreen_hotspot);
-    overlay.set_measure_overlay(&fullscreen_hotspot, false);
-    overlay.set_clip_overlay(&fullscreen_hotspot, false);
+    if !no_fullscreen_bar {
+        overlay.add_overlay(&fullscreen_hotspot);
+        overlay.set_measure_overlay(&fullscreen_hotspot, false);
+        overlay.set_clip_overlay(&fullscreen_hotspot, false);
+    }
 
     let fullscreen_state = Rc::new(RefCell::new(chrome::FullscreenChromeState::default()));
     let titlebar_widget = header_bar.clone().upcast::<gtk::Widget>();
@@ -343,6 +352,8 @@ fn run_window(
             );
         }
     });
+
+    resize::install(&window, &picture, input_tx.clone());
 
     let hotspot_motion = gtk::EventControllerMotion::new();
     hotspot_motion.connect_enter({
@@ -912,6 +923,15 @@ fn run_window(
     Ok(())
 }
 
+fn display_overlay(picture: &gtk::Picture, status_label: &gtk::Label) -> gtk::Overlay {
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(picture));
+    // Status changes must not alter the allocation used for guest auto-resize.
+    overlay.add_overlay(status_label);
+    overlay.set_measure_overlay(status_label, false);
+    overlay
+}
+
 /// Resolve a `--monitor` spec against the default display's monitors.
 fn find_monitor(spec: &str) -> Option<gdk::Monitor> {
     let monitors = list_monitors();
@@ -1119,6 +1139,7 @@ enum InputEvent {
     MouseAbs { x: u32, y: u32 },
     MouseRel { dx: i32, dy: i32 },
     MouseWheel(MouseButton),
+    UiInfo { width: u32, height: u32 },
 }
 
 #[cfg(test)]

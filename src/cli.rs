@@ -94,6 +94,11 @@ pub struct ConnectArgs {
     #[arg(long)]
     pub undecorated: bool,
 
+    /// Do not show the floating toolbar (or its top-edge hover hotspot) in
+    /// fullscreen. Useful when the guest has panels at the screen edges.
+    #[arg(long)]
+    pub no_fullscreen_bar: bool,
+
     /// Use QEMU-provided DMABUF damage rectangles instead of full-surface
     /// refreshes. This can be faster, but some guest/driver combinations may
     /// flicker.

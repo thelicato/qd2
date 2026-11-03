@@ -150,6 +150,15 @@ pub(super) async fn listener_session(
                         continue;
                     }
 
+                    if let InputEvent::UiInfo { width, height } = &input {
+                        if let Err(error) = console.set_ui_info(*width, *height).await {
+                            let _ = event_tx.send(ViewerEvent::Status(format!(
+                                "Guest resize request failed: {error:#}"
+                            )));
+                        }
+                        continue;
+                    }
+
                     let needs_mouse_mode = mouse::input_needs_mouse_mode(&input);
                     if let Err(error) = console.handle_input(input).await {
                         let recovered = if needs_mouse_mode {

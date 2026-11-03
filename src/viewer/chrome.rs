@@ -325,7 +325,7 @@ pub(super) fn schedule_hide_fullscreen_bar(
     state.borrow_mut().hide_source = Some(source);
 }
 
-/// Swap between the native titlebar and the floating fullscreen controls so the
+/// Toggle the native titlebar and the floating fullscreen controls so the
 /// fullscreen window behaves like virt-viewer instead of a stock GTK header bar.
 pub(super) fn sync_fullscreen_chrome(
     window: &gtk::Window,
@@ -341,8 +341,11 @@ pub(super) fn sync_fullscreen_chrome(
         update_fullscreen_button(button, is_fullscreen);
     }
 
+    // GTK4 forbids set_titlebar() on a realized window (warning + segfault).
+    // Keep the titlebar set once at construction and only toggle its visibility;
+    // GTK hides titlebars in fullscreen anyway.
     if is_fullscreen {
-        window.set_titlebar(None::<&gtk::Widget>);
+        header_bar.set_visible(false);
         fullscreen_hotspot.set_visible(true);
         reveal_fullscreen_bar(fullscreen_revealer, fullscreen_state);
         schedule_hide_fullscreen_bar(window, fullscreen_revealer, fullscreen_state);
@@ -351,10 +354,6 @@ pub(super) fn sync_fullscreen_chrome(
         fullscreen_revealer.set_reveal_child(false);
         fullscreen_revealer.set_visible(false);
         fullscreen_hotspot.set_visible(false);
-        if decorated_window {
-            window.set_titlebar(Some(header_bar));
-        } else {
-            window.set_titlebar(None::<&gtk::Widget>);
-        }
+        header_bar.set_visible(decorated_window);
     }
 }
